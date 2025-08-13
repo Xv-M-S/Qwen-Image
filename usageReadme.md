@@ -20,3 +20,15 @@ pip install accelerate
 ``` bash
 python quickStart.py
 ```
+
+# use demo to start
+
+``` bash
+pip install gradio
+pip install dashscope
+export NUM_GPUS_TO_USE=1          # Number of GPUs to use
+export TASK_QUEUE_SIZE=100        # Task queue size
+export TASK_TIMEOUT=300           # Task timeout in seconds
+export DASHSCOPE_API_KEY=sk-3179f054c4a149e4ad40aadd2c5b6755
+python examples/demo.py
+```
