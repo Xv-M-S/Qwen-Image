@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Qwen-Image调试",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/sxm/flux-workspace/Qwen-Image/quickStart.py",
+            "console": "integratedTerminal",
+            "cwd": "/home/sxm/flux-workspace/Qwen-Image",
+            "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3"
+        }
+    ]
+}
+        
