@@ -15,6 +15,17 @@ pip install -r requirements.txt
 pip install accelerate
 ```
 
+# for read source code 
+
+``` bash
+git clone https://github.com/huggingface/diffusers.git
+cd diffusers
+pip install -e .
+```
+
+
+# download model 
+
 # quick start
 
 ``` bash
