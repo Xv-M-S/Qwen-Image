@@ -269,6 +269,7 @@ class QwenDoubleStreamAttnProcessor2_0:
         if encoder_hidden_states is None:
             raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
 
+
         seq_txt = encoder_hidden_states.shape[1]
 
         # Compute QKV for image stream (sample projections)

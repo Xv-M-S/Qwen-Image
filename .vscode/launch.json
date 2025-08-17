@@ -8,7 +8,9 @@
             "program": "/home/sxm/flux-workspace/Qwen-Image/quickStart.py",
             "console": "integratedTerminal",
             "cwd": "/home/sxm/flux-workspace/Qwen-Image",
-            "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3"
+            "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3",
+            // 允许调试第三方库
+            "justMyCode": false
         }
     ]
 }

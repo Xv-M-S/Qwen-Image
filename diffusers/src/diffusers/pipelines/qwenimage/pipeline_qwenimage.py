@@ -574,7 +574,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
         )
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
-        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt( # 在只输入文本的情况下，可以看成是使用Qwen-7B-Chat进行文本编码
             prompt=prompt,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
