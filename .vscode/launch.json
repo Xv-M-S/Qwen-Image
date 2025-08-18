@@ -11,7 +11,22 @@
             "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3",
             // 允许调试第三方库
             "justMyCode": false
+        },
+        {
+            "name": "Regional-Qwen-Image调试",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/sxm/flux-workspace/Qwen-Image/regionalPromptStart.py",
+            "console": "integratedTerminal",
+            "cwd": "/home/sxm/flux-workspace/Qwen-Image",
+            "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3",
+            // 允许调试第三方库
+            "justMyCode": false
         }
+
+
     ]
+
+    
 }
         

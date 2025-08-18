@@ -22,6 +22,7 @@ positive_magic = {
 # Generate image
 prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup," with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197".'''
 
+prompt = ''' A coffee shop entrance features a chalkboard sign reading "知不可乎骤得,托遗响于悲风. 知不可乎骤得,托遗响于悲风.悟已往之不谏,知来者之可追。何事秋风悲画善，落叶聚还散，寒鸦栖复惊。相去日已远，衣带渐宽终不悔，为伊消得人憔悴。" with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful picture of a girl with a smile.'''
 negative_prompt = " " # Recommended if you don't use a negative prompt.
 
 

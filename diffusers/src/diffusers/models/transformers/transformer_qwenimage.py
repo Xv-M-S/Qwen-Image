@@ -398,7 +398,11 @@ class QwenImageTransformerBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_mask: torch.Tensor,
         temb: torch.Tensor,
+        encoder_hidden_states_base: torch.Tensor = None, # added 
+        encoder_hidden_states_base_mask: torch.Tensor = None, # added
+        base_ratio: float = None, # added for regional control
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        image_rotary_emb_base: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, # added
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get modulation parameters for both streams
@@ -417,6 +421,11 @@ class QwenImageTransformerBlock(nn.Module):
         txt_normed = self.txt_norm1(encoder_hidden_states)
         txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
 
+        # Process text stream for base prompt if provided - norm1 + modulation
+        if encoder_hidden_states_base is not None:
+            txt_normed_base = self.txt_norm1(encoder_hidden_states_base)
+            txt_modulated_base, txt_gate1_base = self._modulate(txt_normed_base, txt_mod1)
+
         # Use QwenAttnProcessor2_0 for joint attention computation
         # This directly implements the DoubleStreamLayerMegatron logic:
         # 1. Computes QKV for both streams
@@ -428,12 +437,16 @@ class QwenImageTransformerBlock(nn.Module):
             hidden_states=img_modulated,  # Image stream (will be processed as "sample")
             encoder_hidden_states=txt_modulated,  # Text stream (will be processed as "context")
             encoder_hidden_states_mask=encoder_hidden_states_mask,
+            encoder_hidden_states_base=txt_modulated_base if encoder_hidden_states_base is not None else None, # added
+            encoder_hidden_states_base_mask=encoder_hidden_states_base_mask if encoder_hidden_states_base is not None else None, # added
+            base_ratio=base_ratio if encoder_hidden_states_base is not None else None, # added for regional control
             image_rotary_emb=image_rotary_emb,
-            **joint_attention_kwargs,
+            image_rotary_emb_base=image_rotary_emb_base if encoder_hidden_states_base is not None else None, # added
+            joint_attention_kwargs=joint_attention_kwargs, # changed
         )
 
         # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
-        img_attn_output, txt_attn_output = attn_output
+        img_attn_output, txt_attn_output, txt_base_attn_output = attn_output
 
         # Apply attention gates and add residual (like in Megatron)
         hidden_states = hidden_states + img_gate1 * img_attn_output
@@ -451,13 +464,21 @@ class QwenImageTransformerBlock(nn.Module):
         txt_mlp_output = self.txt_mlp(txt_modulated2)
         encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
 
+        if encoder_hidden_states_base is not None:
+            txt_normed2_base = self.txt_norm2(encoder_hidden_states_base)
+            txt_modulated2_base, txt_gate2_base = self._modulate(txt_normed2_base, txt_mod2)
+            txt_mlp_output_base = self.txt_mlp(txt_modulated2_base)
+            encoder_hidden_states_base = encoder_hidden_states_base + txt_gate2_base * txt_mlp_output_base
+
         # Clip to prevent overflow for fp16
         if encoder_hidden_states.dtype == torch.float16:
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
         if hidden_states.dtype == torch.float16:
             hidden_states = hidden_states.clip(-65504, 65504)
+        if encoder_hidden_states_base is not None and encoder_hidden_states_base.dtype == torch.float16:
+            encoder_hidden_states_base = encoder_hidden_states_base.clip(-65504, 65504)
 
-        return encoder_hidden_states, hidden_states
+        return encoder_hidden_states, hidden_states, encoder_hidden_states_base
 
 
 class QwenImageTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin, CacheMixin):
