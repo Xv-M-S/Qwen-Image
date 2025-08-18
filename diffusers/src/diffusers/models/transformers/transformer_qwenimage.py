@@ -451,6 +451,8 @@ class QwenImageTransformerBlock(nn.Module):
         # Apply attention gates and add residual (like in Megatron)
         hidden_states = hidden_states + img_gate1 * img_attn_output
         encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
+        if encoder_hidden_states_base is not None:
+            encoder_hidden_states_base = encoder_hidden_states_base + txt_gate1_base * txt_base_attn_output
 
         # Process image stream - norm2 + MLP
         img_normed2 = self.img_norm2(hidden_states)
