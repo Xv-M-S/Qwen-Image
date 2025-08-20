@@ -129,6 +129,10 @@ class RegionalQwenImageTransformer(QwenImageTransformer2DModel):
         additional_kwargs = {}
         if base_ratio is not None:
             additional_kwargs["regional_attention_mask"] = attention_kwargs['regional_attention_mask']
+        # 是否启用区域mask技术
+        if attention_kwargs["enable_whole_regional_mask"]:
+            additional_kwargs["whole_regional_mask"] = attention_kwargs["whole_regional_mask"]
+            additional_kwargs["enable_whole_regional_mask"] = attention_kwargs["enable_whole_regional_mask"]
         additional_kwargs["hidden_seq_len"] = hidden_states.shape[1]
 
         # when using controlnet, only one prompt is provided, so we need to consider the case

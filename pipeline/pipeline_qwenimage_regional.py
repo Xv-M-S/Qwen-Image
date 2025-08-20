@@ -204,8 +204,21 @@ class RegionalQwenImageAttnProcessor:
 
 
         if base_ratio is not None:
-            # merge hidden_states and hidden_states_base
-            hidden_states = hidden_states*(1-base_ratio) + hidden_states_base*base_ratio
+            if 'whole_regional_mask' in joint_attention_kwargs and joint_attention_kwargs["enable_whole_regional_mask"]:
+                joint_attention_kwargs["whole_regional_mask"] = joint_attention_kwargs["whole_regional_mask"].to(hidden_states.device).to(hidden_states.dtype)
+                # mask merge method 1: non_regional_area 100 per use base_prompt
+                hidden_states = hidden_states * joint_attention_kwargs["whole_regional_mask"] *(1 - base_ratio) + hidden_states_base * joint_attention_kwargs["whole_regional_mask"] * base_ratio
+                hidden_states = hidden_states + hidden_states_base * (1 - joint_attention_kwargs["whole_regional_mask"])
+
+                # apply regional control to hidden_states_base
+                # hidden_states will be used for generate hidden_states_base and hidden_states for next step
+
+                # mask merge method 2: regional_area use 100 per regional_control and add base_ratio non_regional_control
+                # hidden_states = hidden_states * joint_attention_kwargs["whole_regional_mask"] * (1 - base_ratio) + hidden_states_base * base_ratio
+                # hidden_states = hidden_states / (joint_attention_kwargs["whole_regional_mask"] +  base_ratio)  # avoid division by zero
+            else:
+                # merge hidden_states and hidden_states_base
+                hidden_states = hidden_states*(1-base_ratio) + hidden_states_base*base_ratio
             return hidden_states, encoder_hidden_states, encoder_hidden_states_base
         else: # both regional and base input are base prompts, skip the merge
             return hidden_states, encoder_hidden_states, encoder_hidden_states
@@ -400,6 +413,11 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         each_prompt_seq_len = [] 
         H, W = height//(self.vae_scale_factor)//2, width//(self.vae_scale_factor)//2
         hidden_seq_len = H * W
+
+        # prepare base ration regional masks
+        if attention_kwargs is not None and attention_kwargs["enable_whole_regional_mask"]:
+            attention_kwargs["whole_regional_mask"] = torch.nn.functional.interpolate(attention_kwargs["whole_regional_mask"][None, None, :, :], (H, W), mode='nearest-exact').flatten().unsqueeze(1)
+        
         for mask, cond, cond_mask in regional_inputs:
             if mask is not None: # resize regional masks to image size, the flatten is to match the seq len
                 mask = torch.nn.functional.interpolate(mask[None, None, :, :], (H, W), mode='nearest-exact').flatten().unsqueeze(1).repeat(1, cond.size(1))
@@ -552,6 +570,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                         # 'single_inject_blocks_interval': attention_kwargs['single_inject_blocks_interval'] if 'single_inject_blocks_interval' in attention_kwargs else len(self.transformer.transformer_blocks), 
                         'double_inject_blocks_interval': attention_kwargs['double_inject_blocks_interval'] if 'double_inject_blocks_interval' in attention_kwargs else len(self.transformer.transformer_blocks),
                         'regional_attention_mask': regional_attention_mask if base_ratio is not None else None,
+                        "whole_regional_mask": attention_kwargs["whole_regional_mask"],  # 是否在相乘的时候只在mask上进行
+                        "enable_whole_regional_mask": attention_kwargs["enable_whole_regional_mask"]
                         },
                         return_dict=False,
                     )[0]

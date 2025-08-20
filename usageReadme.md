@@ -43,3 +43,9 @@ export TASK_TIMEOUT=300           # Task timeout in seconds
 export DASHSCOPE_API_KEY=sk-3179f054c4a149e4ad40aadd2c5b6755
 python examples/demo.py
 ```
+
+# test hyperparameter
+mainly test inject_steps and base_ration parameters 
+``` bash
+python hyperParamExp.py
+```
