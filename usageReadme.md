@@ -12,6 +12,8 @@ pip install transformers==4.55.0
 # 安装其他安装包
 pip install -r requirements.txt
 
+pip install matplotlib
+
 pip install accelerate
 ```
 

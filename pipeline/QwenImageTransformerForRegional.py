@@ -3,6 +3,7 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 import torch
 from typing import Any, Dict, List, Optional, Tuple, Union
 from diffusers.models.attention_processor import AttentionProcessor
+from util.tool import cost_time
 
 
 
@@ -69,6 +70,7 @@ class RegionalQwenImageTransformer(QwenImageTransformer2DModel):
         for name, module in self.named_children():
             fn_recursive_attn_processor(name, module, processor)
     
+    @cost_time
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -163,25 +165,32 @@ class RegionalQwenImageTransformer(QwenImageTransformer2DModel):
         image_rotary_emb = self.pos_embed(img_shapes, regional_txt_seq_lens, device=hidden_states.device)
 
         for index_block, block in enumerate(self.transformer_blocks):
+            additional_kwargs["index_block"] = str(index_block)
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
+                outputs = self._gradient_checkpointing_func(
                     block,
                     hidden_states,
                     encoder_hidden_states,
                     encoder_hidden_states_mask,
                     temb,
+                    encoder_hidden_states_base,
+                    encoder_hidden_states_base_mask,
+                    base_ratio,
                     image_rotary_emb,
+                    image_rotary_emb_base,
+                    additional_kwargs if index_block % attention_kwargs['double_inject_blocks_interval'] == 0 else {k: v for k, v in additional_kwargs.items() if k != 'regional_attention_mask'}
                 )
+                encoder_hidden_states, hidden_states, encoder_hidden_states_base = outputs
 
             else:
                 encoder_hidden_states, hidden_states, encoder_hidden_states_base = block(
                     hidden_states=hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_hidden_states_mask=encoder_hidden_states_mask,
+                    temb=temb,
                     encoder_hidden_states_base=encoder_hidden_states_base, # added
                     encoder_hidden_states_base_mask=encoder_hidden_states_base_mask, # added
                     base_ratio=base_ratio,  # added for regional control
-                    temb=temb,
                     image_rotary_emb=image_rotary_emb,
                     image_rotary_emb_base=image_rotary_emb_base, # added
                     # 根据当前 block 的索引是否满足特定条件，决定是否保留 additional_kwargs 中的 'regional_attention_mask' 字段。如果不满足，则从传入的参数中删除该字段，从而控制是否启用“区域注意力”（region control）。

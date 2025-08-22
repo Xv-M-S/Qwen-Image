@@ -8,6 +8,11 @@ from diffusers.pipelines.qwenimage.pipeline_qwenimage import calculate_shift, re
 from diffusers.models.attention_processor import Attention
 from diffusers.models.attention_dispatch import dispatch_attention_fn
 import torch.nn.functional as F
+from pipeline.attentionControl import AttentionStore
+import re
+from pipeline.gaussion_smoothing import GaussianSmoothing
+from config.boxLossConfig import boxConfig
+from util.tool import cost_time
 
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
@@ -65,12 +70,50 @@ class RegionalQwenImageAttnProcessor:
 
     _attention_backend = None
 
-    def __init__(self):
+    def __init__(self, attnstore= None):
         self.regional_mask = None
+        self.attnstore = attnstore
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError(
                 "QwenDoubleStreamAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0."
             )
+        
+
+
+    def scaled_dot_product_attention_with_probs(self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
+        """
+        手动实现 scaled dot-product attention，并返回 attention probs
+        query, key, value: [B, H, S, D]
+        参考官方伪代码: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
+        """
+        L, S = query.size(-2), key.size(-2)
+        scale = 1.0 / query.size(-1)**0.5
+
+        # QK^T
+        attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale  # [B, H, L, S]
+
+        # 应用 causal mask
+        # is_causal 参数在 scaled_dot_product_attention 函数中的作用是：
+        # 启用因果注意力（Causal Attention）或称自回归掩码（Autoregressive Masking），
+        # 它确保在解码过程中，每个位置只能关注到它之前（包括自身）的位置，而不能“看到”未来的信息。
+        if is_causal:
+            causal_mask = torch.triu(torch.ones(L, S, dtype=torch.bool, device=attn_scores.device), diagonal=1)
+            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
+
+        # 应用用户提供的 mask
+        if attn_mask is not None:
+            attn_scores = attn_scores + attn_mask  # 注意：attn_mask 应为 float，-inf 表示遮挡
+
+        # Softmax -> attention probs
+        attn_probs = F.softmax(attn_scores, dim=-1)  # [B, H, L, S]
+
+        # Dropout
+        attn_probs = F.dropout(attn_probs, p=dropout_p, training=True)
+
+        # @V
+        attn_output = torch.matmul(attn_probs, value)  # [B, H, L, D]
+
+        return attn_output, attn_probs  # ✅ 返回 probs
         
     def RegionalQwenAttnProcessor2_0_call(
         self,
@@ -80,6 +123,102 @@ class RegionalQwenImageAttnProcessor:
         encoder_hidden_states_mask: torch.FloatTensor = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        index_block: str = None
+    ) -> torch.FloatTensor:
+
+        if encoder_hidden_states is None:
+            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
+
+        seq_txt = encoder_hidden_states.shape[1]
+
+        # Compute QKV for image stream
+        img_query = attn.to_q(hidden_states)
+        img_key = attn.to_k(hidden_states)
+        img_value = attn.to_v(hidden_states)
+
+        # Compute QKV for text stream
+        txt_query = attn.add_q_proj(encoder_hidden_states)
+        txt_key = attn.add_k_proj(encoder_hidden_states)
+        txt_value = attn.add_v_proj(encoder_hidden_states)
+
+        # Reshape for multi-head attention
+        img_query = img_query.unflatten(-1, (attn.heads, -1))
+        img_key = img_key.unflatten(-1, (attn.heads, -1))
+        img_value = img_value.unflatten(-1, (attn.heads, -1))
+
+        txt_query = txt_query.unflatten(-1, (attn.heads, -1))
+        txt_key = txt_key.unflatten(-1, (attn.heads, -1))
+        txt_value = txt_value.unflatten(-1, (attn.heads, -1))
+
+        # Apply QK normalization
+        if attn.norm_q is not None:
+            img_query = attn.norm_q(img_query)
+        if attn.norm_k is not None:
+            img_key = attn.norm_k(img_key)
+        if attn.norm_added_q is not None:
+            txt_query = attn.norm_added_q(txt_query)
+        if attn.norm_added_k is not None:
+            txt_key = attn.norm_added_k(txt_key)
+
+        # Apply RoPE
+        if image_rotary_emb is not None:
+            img_freqs, txt_freqs = image_rotary_emb
+            img_query = apply_rotary_emb_qwen(img_query, img_freqs, use_real=False)
+            img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
+            txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
+            txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+
+        # Concatenate for joint attention: [text, image]
+        joint_query = torch.cat([txt_query, img_query], dim=1).permute(0,2,1,3)  # dim=2: seq_len
+        joint_key = torch.cat([txt_key, img_key], dim=1).permute(0,2,1,3)
+        joint_value = torch.cat([txt_value, img_value], dim=1).permute(0,2,1,3)
+
+
+
+        joint_hidden_states, attn_probs = self.scaled_dot_product_attention_with_probs(
+            query=joint_query,
+            key=joint_key,
+            value=joint_value,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False
+        )
+
+        # Store attention for box loss
+        if self.attnstore is not None and boxConfig.switch_box_loss and index_block in boxConfig.train_layer:
+            # Extract image-to-text cross attention: img_query vs txt_key
+            # joint_query: [txt_query, img_query] -> img_query starts at seq_txt
+            # joint_key:   [txt_key,   img_key]   -> txt_key ends at seq_txt
+            img_txt_attn = attn_probs[:, :, seq_txt:, :seq_txt]  # [B, H, S_img, S_txt]
+            img_txt_attn = img_txt_attn.mean(dim=1)  # Average over heads -> [B, S_img, S_txt]
+            is_cross = True
+            self.attnstore(img_txt_attn, is_cross)
+
+        # Reshape back
+        joint_hidden_states = joint_hidden_states.transpose(1, 2).flatten(2, 3)  # [B, S_joint, H*D]
+        joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
+
+        # Split
+        txt_attn_output = joint_hidden_states[:, :seq_txt, :]
+        img_attn_output = joint_hidden_states[:, seq_txt:, :]
+
+        # Output projections
+        img_attn_output = attn.to_out[0](img_attn_output)
+        if len(attn.to_out) > 1:
+            img_attn_output = attn.to_out[1](img_attn_output)
+
+        txt_attn_output = attn.to_add_out(txt_attn_output)
+
+        return img_attn_output, txt_attn_output
+    def RegionalQwenAttnProcessor2_0_call_old(
+        self,
+        attn: Attention,
+        hidden_states: torch.FloatTensor,  # Image stream
+        encoder_hidden_states: torch.FloatTensor = None,  # Text stream
+        encoder_hidden_states_mask: torch.FloatTensor = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        index_block: str = None
     ) -> torch.FloatTensor:
         if encoder_hidden_states is None:
             raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
@@ -141,6 +280,15 @@ class RegionalQwenImageAttnProcessor:
             backend=self._attention_backend,
         )
 
+        # 使用不加速的方式重新计算一遍 attention socre
+        if self.attnstore is not None and boxConfig.switch_box_loss and index_block in boxConfig.train_layer:
+            score_query = hidden_states # img 
+            score_key = encoder_hidden_states # txt
+            attention_probs = attn.get_attention_scores(score_query, score_key, attention_mask=None)
+            is_cross = encoder_hidden_states is not None
+            self.attnstore(attention_probs, is_cross)
+
+
         # Reshape back
         joint_hidden_states = joint_hidden_states.flatten(2, 3)
         joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
@@ -173,6 +321,7 @@ class RegionalQwenImageAttnProcessor:
         image_rotary_emb_base: Optional[torch.Tensor] = None, # added
         joint_attention_kwargs: Optional[Dict[str, Any]] = None, # added
     ) -> torch.FloatTensor:
+        index_block = joint_attention_kwargs["index_block"] if joint_attention_kwargs is not None else None
         if base_ratio is not None:
             hidden_states_base, encoder_hidden_states_base = self.RegionalQwenAttnProcessor2_0_call(
                 attn = attn,
@@ -180,16 +329,22 @@ class RegionalQwenImageAttnProcessor:
                 encoder_hidden_states = encoder_hidden_states_base,
                 encoder_hidden_states_mask = encoder_hidden_states_base_mask,
                 attention_mask = attention_mask,
-                image_rotary_emb=image_rotary_emb_base
+                image_rotary_emb=image_rotary_emb_base,
+                index_block = index_block
             )
 
         # move regional mask to device
         if base_ratio is not None and 'regional_attention_mask' in joint_attention_kwargs:
             if self.regional_mask is not None:
-                regional_mask = self.regional_mask.to(hidden_states.device)
+                if  self.regional_mask.device != hidden_states.device:
+                    regional_mask = self.regional_mask.to(hidden_states.device)
+                else:
+                    regional_mask = self.regional_mask
             else:
+                # regional_mask = self.regional_mask.to(hidden_states.device)
+                # avoid duplicate move to device
                 self.regional_mask = joint_attention_kwargs['regional_attention_mask']
-                regional_mask = self.regional_mask.to(hidden_states.device)
+                regional_mask = self.regional_mask
         else:
             regional_mask = None
 
@@ -199,13 +354,14 @@ class RegionalQwenImageAttnProcessor:
             encoder_hidden_states = encoder_hidden_states,
             encoder_hidden_states_mask = encoder_hidden_states_mask,
             attention_mask = regional_mask,
-            image_rotary_emb=image_rotary_emb
+            image_rotary_emb=image_rotary_emb,
+            index_block = index_block
         )
 
 
         if base_ratio is not None:
             if 'whole_regional_mask' in joint_attention_kwargs and joint_attention_kwargs["enable_whole_regional_mask"]:
-                joint_attention_kwargs["whole_regional_mask"] = joint_attention_kwargs["whole_regional_mask"].to(hidden_states.device).to(hidden_states.dtype)
+                joint_attention_kwargs["whole_regional_mask"] = joint_attention_kwargs["whole_regional_mask"]  # .to(hidden_states.device).to(hidden_states.dtype)
                 # mask merge method 1: non_regional_area 100 per use base_prompt
                 hidden_states = hidden_states * joint_attention_kwargs["whole_regional_mask"] *(1 - base_ratio) + hidden_states_base * joint_attention_kwargs["whole_regional_mask"] * base_ratio
                 hidden_states = hidden_states + hidden_states_base * (1 - joint_attention_kwargs["whole_regional_mask"])
@@ -228,17 +384,312 @@ class RegionalQwenImageAttnProcessor:
         
 
 class RegionalQwenImagePipeline(QwenImagePipeline):
+
+    def get_token_index(self, prompt, quote_prompt):
+        # 对基础提示进行 tokenization
+        # 步骤 1: 提取所有双引号内的内容（保留原样）
+        print("🔍 提取的引号内容:")
+        quoted_texts = re.findall(r'"(.*?)"', prompt)
+        for i, text in enumerate(quoted_texts):
+            print(f"  [{i}] {repr(text)}")
+        
+        # 步骤 2: Tokenize 整个 prompt
+        tokens = self.tokenizer.tokenize(prompt)
+        token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+
+        print(f"\n📊 总 token 数: {len(tokens)}")
+        print("🔤 前 20 个 tokens:", tokens[:100])
+
+        # 步骤 3: 对每个引号内容，查找其在 token stream 中的位置
+        print("\n📌 引号内容在 tokenizer 中的位置:")
+        quote_to_token_positions = {}
+
+        for idx, quote in enumerate(quoted_texts):
+            print(f"\n--- 处理引号内容 [{idx}]: {repr(quote)} ---")
+
+            # 将引号内容单独 tokenize
+            quote_tokens = self.tokenizer.tokenize(quote)
+            quote_token_ids = self.tokenizer.convert_tokens_to_ids(quote_tokens)
+
+            print(f"  Tokenized 子串: {quote_tokens}")
+            print(f"  Token IDs: {quote_token_ids}")
+
+            # 在完整 token stream 中查找匹配
+            found = False
+            positions = None
+            for start_idx in range(len(token_ids) - len(quote_token_ids) + 1):
+                end_idx = start_idx + len(quote_token_ids)
+                if token_ids[start_idx:end_idx] == quote_token_ids:
+                    print(f"  ✅ 匹配位置: 起始索引 = {start_idx}, 结束索引 = {end_idx - 1} (token 范围: [{start_idx}:{end_idx}])")
+                    # 可选：验证一下还原的文本
+                    reconstructed = self.tokenizer.decode(token_ids[start_idx:end_idx])
+                    print(f"  🔁 重建文本: {repr(reconstructed)}")
+                    found = True
+                    positions = list(range(start_idx, end_idx))
+                    break
+
+            if positions is not None:
+                quote_to_token_positions[quote] = positions
+                print(f"  ✅ 匹配成功，token 位置: {positions}")
+                print(f"  🔄 从 tokens 重建: {repr(self.tokenizer.decode(token_ids[positions[0]:positions[-1]+1]))}")
+            else:
+                print(f"  ❌ 未找到匹配")
+                quote_to_token_positions[quote] = []
+        
+        # ======================
+        # 6. 最终结果：每个引号内容对应的 token 位置集合
+        # ======================
+        print("\n" + "="*60)
+        print("✅ 每个引号内容在 token 序列中的位置集合：")
+        print("="*60)
+        for quote, positions in quote_to_token_positions.items():
+            print(f"""
+        引号内容: "{quote}"
+        位置集合: {positions}
+        长度: {len(positions)} tokens
+        """)
+        
+        # 从 Python 3.7 开始，dict（字典）保证保持插入顺序。
+        return quote_to_token_positions
+    
+    def aggregate_attention(
+                        self,
+                        attention_store: AttentionStore,
+                        is_cross: bool,
+                        shape: Tuple[int, int],
+                        select: int # select 为什么要设置为0，需要探究？
+                    ) -> torch.Tensor:
+        """ Aggregates the attention across the different layers and heads at the specified resolution. """
+        out = []
+        attention_maps = attention_store.get_store_attention()
+        # print(attention_maps)
+
+        for item in attention_maps[f"{'cross' if is_cross else 'self'}"]:
+            cross_maps = item.reshape(1, -1, int(shape[0]/shape[2]), int(shape[1]/shape[2]), item.shape[-1])[select]
+            out.append(cross_maps)
+        out = torch.cat(out, dim=0)
+        out = out.sum(0) / out.shape[0]
+        return out
+    
+    def _compute_max_attention_per_index(self,
+                                        attention_maps: torch.Tensor,
+                                        indices_to_alter: List[int],
+                                        smooth_attentions: bool = False,
+                                        shape: Optional[Tuple[int, int, int]] = None,
+                                        sigma: float = 0.5,
+                                        kernel_size: int = 3,
+                                        bbox: List[int] = None,
+                                        ) -> List[torch.Tensor]:
+        """ Computes the maximum attention value for each of the tokens we wish to alter. """
+        # last_idx = -1
+        # if normalize_eot:
+        #     prompt = self.prompt
+        #     if isinstance(self.prompt, list):
+        #         prompt = self.prompt[0]
+        #     last_idx = len(self.tokenizer(prompt)['input_ids']) - 1
+        # attention_for_text = attention_maps[:, :, 1:last_idx]
+        # QwenVL 截断了 eot token,第一个便是有效字符
+        attention_for_text = attention_maps
+        attention_for_text *= 100
+        attention_for_text = torch.nn.functional.softmax(attention_for_text, dim=-1)
+
+        # Shift indices since we removed the first token
+        # indices_to_alter = [index - 1 for index in indices_to_alter]
+        indices_to_alter = [[index - 1 for index in sublist] for sublist in indices_to_alter]
+
+        # Extract the maximum values
+        max_indices_list_fg = []
+        max_indices_list_bg = []
+        dist_x = []
+        dist_y = []
+
+        height, width, scale_factor = shape
+
+        cnt = 0
+        """
+            情况不一样 -> boxdiff是一个框只有一个token描述,而我们一个框有多个token描述,此处有待改进
+        """
+        for cnt, indices in enumerate(indices_to_alter):
+
+            for i in indices:
+                image = attention_for_text[:, :, i]
+
+                box = [max(round(b/scale_factor), 0) for b in bbox[cnt]]
+                x1, y1, x2, y2 = box
+
+                # coordinates to masks
+                obj_mask = torch.zeros_like(image)
+                ones_mask = torch.ones([y2 - y1, x2 - x1], dtype=obj_mask.dtype).to(obj_mask.device)
+                obj_mask[y1:y2, x1:x2] = ones_mask
+                bg_mask = 1 - obj_mask
+
+                if smooth_attentions:
+                    smoothing = GaussianSmoothing(channels=1, kernel_size=kernel_size, sigma=sigma, dim=2).cuda()
+                    input = F.pad(image.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode='reflect')
+                    image = smoothing(input).squeeze(0).squeeze(0)
+
+                # Inner-Box constraint
+                k = (obj_mask.sum() * boxConfig.P).long()
+                max_indices_list_fg.append((image * obj_mask).reshape(-1).topk(k)[0].mean())
+
+                # Outer-Box constraint
+                k = (bg_mask.sum() * boxConfig.P).long()
+                max_indices_list_bg.append((image * bg_mask).reshape(-1).topk(k)[0].mean())
+
+                # Corner Constraint
+                gt_proj_x = torch.max(obj_mask, dim=0)[0]
+                gt_proj_y = torch.max(obj_mask, dim=1)[0]
+                corner_mask_x = torch.zeros_like(gt_proj_x)
+                corner_mask_y = torch.zeros_like(gt_proj_y)
+
+                # create gt according to the number config.L
+                N = gt_proj_x.shape[0]
+                corner_mask_x[max(box[0] - boxConfig.L, 0): min(box[0] + boxConfig.L + 1, N)] = 1.
+                corner_mask_x[max(box[2] - boxConfig.L, 0): min(box[2] + boxConfig.L + 1, N)] = 1.
+                corner_mask_y[max(box[1] - boxConfig.L, 0): min(box[1] + boxConfig.L + 1, N)] = 1.
+                corner_mask_y[max(box[3] - boxConfig.L, 0): min(box[3] + boxConfig.L + 1, N)] = 1.
+                dist_x.append((F.l1_loss(image.max(dim=0)[0], gt_proj_x, reduction='none') * corner_mask_x).mean())
+                dist_y.append((F.l1_loss(image.max(dim=1)[0], gt_proj_y, reduction='none') * corner_mask_y).mean())
+
+        return max_indices_list_fg, max_indices_list_bg, dist_x, dist_y
+
+    @cost_time
+    def _aggregate_and_get_max_attention_per_token(self, 
+                                                    attention_store: AttentionStore,
+                                                    indices_to_alter:Dict[str, List[int]],
+                                                    gaussian_smoothing_kwargs:Dict[str, Any],
+                                                    shape: Tuple[int, int, int],
+                                                    bbox:List[List[int]]
+                                                        ):
+        """ Aggregates the attention for each token and computes the max activation value for each token to alter. """
+        attention_maps = self.aggregate_attention(
+                attention_store=attention_store,
+                shape=shape, 
+                is_cross=True,
+                select=0 # why 0
+            )
+        values_list = [indices_to_alter[key] for key in indices_to_alter]
+        max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._compute_max_attention_per_index(
+            attention_maps=attention_maps,
+            indices_to_alter=values_list,
+            smooth_attentions=gaussian_smoothing_kwargs.get("smooth_attentions", False),
+            sigma=gaussian_smoothing_kwargs.get("sigma", 0.5),
+            kernel_size=gaussian_smoothing_kwargs.get("kernel_size", 5),
+            shape=shape,
+            bbox=bbox
+        )
+        return max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y
+    
+
+    @staticmethod
+    @cost_time
+    def _compute_loss(max_attention_per_index_fg: List[torch.Tensor], max_attention_per_index_bg: List[torch.Tensor],
+                      dist_x: List[torch.Tensor], dist_y: List[torch.Tensor], return_losses: bool = False) -> torch.Tensor:
+        """ Computes the attend-and-excite loss using the maximum attention value for each token. """
+        losses_fg = [max(0, 1. - curr_max) for curr_max in max_attention_per_index_fg]
+        losses_bg = [max(0, curr_max) for curr_max in max_attention_per_index_bg]
+        loss = sum(losses_fg) + sum(losses_bg) + sum(dist_x) + sum(dist_y)
+        print("losses_fg:", max(losses_fg))
+        if return_losses:
+            return max(losses_fg), losses_fg
+        else:
+            return max(losses_fg), loss
+    
+    @staticmethod
+    @cost_time
+    def _update_latent(latents: torch.Tensor, loss: torch.Tensor, step_size: float) -> torch.Tensor:
+        """ Update the latent according to the computed loss. """
+        grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents], retain_graph=True)[0]
+        latents = latents - step_size * grad_cond
+        # grad_cond = torch.autograd.grad(loss, [latents], retain_graph=False)[0]
+        # with torch.no_grad():
+        #     latents = latents - step_size * grad_cond
+        return latents
+        
+
+    def _perform_iterative_refinement_step(self,
+                                           latents: torch.Tensor,
+                                           encoder_hidden_states_mask: torch.Tensor,
+                                           encoder_hidden_states: torch.Tensor,
+                                           img_shapes: Tuple,
+                                           regional_txt_seq_lens: int,
+                                           indices_to_alter: List[int],
+                                           loss_fg: torch.Tensor,
+                                           threshold: float,
+                                           attention_store: AttentionStore,
+                                           step_size: float,
+                                           timestep: torch.Tensor,
+                                           guidance: torch.Tensor,
+                                           max_refinement_steps: int = 20
+                                           ):
+        """
+        Performs the iterative latent refinement introduced in the paper. Here, we continuously update the latent
+        code according to our loss objective until the given threshold is reached for all tokens.
+        """
+        iteration = 0
+        target_loss = max(0, 1. - threshold)
+        while loss_fg > target_loss:
+            iteration += 1
+
+            latents = latents.clone().detach().requires_grad_(True)
+            self.set_train_transform_layer(boxConfig.train_layer)
+            noise_pred_text = self.transformer(
+                        hidden_states=latents,
+                        timestep=timestep / 1000,
+                        guidance=guidance,
+                        encoder_hidden_states_mask=encoder_hidden_states_mask,
+                        encoder_hidden_states=encoder_hidden_states,
+                        img_shapes=img_shapes,
+                        # txt_seq_lens=negative_txt_seq_lens,
+                        regional_txt_seq_lens=regional_txt_seq_lens,
+                        attention_kwargs=self.attention_kwargs,
+                        return_dict=False,
+                    )[0]
+            self.transformer.zero_grad()
+
+            # Get max activation value for each subject token
+            max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._aggregate_and_get_max_attention_per_token(
+                attention_store=attention_store,
+                indices_to_alter=indices_to_alter,
+                gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
+                shape = (self._height ,self._width ,self.vae_scale_factor*2),
+                bbox=self.attention_kwargs.get("regional_boxes")
+            )
+
+            loss_fg, losses_fg = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y, return_losses=True)
+
+            if loss_fg != 0:  # 此处算出来的梯度特别小，导致loss_fg基本没更新
+                latents = self._update_latent(latents, loss_fg, step_size)
+
+        
+            if iteration >= max_refinement_steps:
+                print(f'\t Exceeded max number of iterations ({max_refinement_steps})! ')
+                break
+        return latents
+    
+    @cost_time
+    def set_train_transform_layer(self, train_transform_layer):
+        for name, param in self.transformer.named_parameters():
+            param.requires_grad = False
+            if 'transformer_blocks' in name:
+                layer_index = int(name.split(".")[1])
+                if layer_index in train_transform_layer:
+                    param.requires_grad = True
+
     """
         @torch.inference_mode() 是 PyTorch 提供的一个 装饰器（decorator），
         用于将函数或方法标记为“推理模式”（inference mode），即仅用于模型前向传播（forward pass），
         不进行梯度计算，也不构建计算图。
         它是 torch.no_grad() 的更严格、更高效的版本，专为推理（inference）场景设计。
     """
-    @torch.inference_mode()
+    # @torch.inference_mode() 会抑制梯度计算，所以此处用@torch.no_grad()
+    # @torch.inference_mode()
+    @torch.no_grad()
     def __call__(
         self,
         base_prompt: Union[str, List[str]] = None,
         negative_prompt: Union[str, List[str]] = None,
+        attention_store: AttentionStore = None,
         true_cfg_scale: float = 4.0,
         height: Optional[int] = None,
         width: Optional[int] = None,
@@ -256,6 +707,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
+        gaussian_smoothing_kwargs: Optional[Dict[str, Any]] = None, # added ,用于attention map 的高斯平滑
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
@@ -355,6 +807,16 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         self._attention_kwargs = attention_kwargs
         self._current_timestep = None
         self._interrupt = False
+        self._gaussian_smoothing_kwargs = gaussian_smoothing_kwargs if gaussian_smoothing_kwargs is not None else {}
+        self._height = height
+        self._width = width
+
+        # get quote prompt token index
+        if isinstance(base_prompt, str) and '"' in base_prompt:
+            quote_to_token_positions = self.get_token_index(base_prompt, quote_prompt=True)
+            print("🔗 引号内容对应的 token 位置:", quote_to_token_positions)
+        else:
+            quote_to_token_positions = None
 
         # 2. Define call parameters
         if base_prompt is not None and isinstance(base_prompt, str):
@@ -389,8 +851,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
             )
 
         # added: define base mask and inputs
-        base_mask = torch.ones((height, width), device=device, dtype=self.transformer.dtype) # base mask uses the whole image mask
-        base_inputs = [(base_mask, prompt_embeds)]
+        # base_mask = torch.ones((height, width), device=device, dtype=self.transformer.dtype) # base mask uses the whole image mask
+        # base_inputs = [(base_mask, prompt_embeds)]
 
         # added: encode regional prompts,define regional inputs
         regional_inputs = []
@@ -517,6 +979,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
+        scale_range = np.linspace(boxConfig.scale_range[0], boxConfig.scale_range[1], self._num_timesteps)
+
         # handle guidance
         if self.transformer.config.guidance_embeds:
             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
@@ -533,10 +997,94 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         )
         regional_txt_seq_lens = regional_embeds_mask.sum(dim=1).tolist() if regional_embeds_mask is not None else None
 
+        # handle infer attention mask
+        regional_attention_mask = regional_attention_mask.to(device)
+        infer_attention_kwargs = {
+            'double_inject_blocks_interval': attention_kwargs['double_inject_blocks_interval'] if 'double_inject_blocks_interval' in attention_kwargs else len(self.transformer.transformer_blocks),
+            "whole_regional_mask": attention_kwargs["whole_regional_mask"].to(device).to(latents.dtype),  # 操作是否局限在mask内
+            "enable_whole_regional_mask": attention_kwargs["enable_whole_regional_mask"]
+        }
+
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                self._current_timestep = t
+                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                timestep = t.expand(latents.shape[0]).to(latents.dtype)
+
+                # 基于局部梯度更新latents，使得初始latents的布局更符合区域提示的要求
+                if i < boxConfig.max_iter_to_alter:
+                    boxConfig.switch_box_loss = True
+                    with torch.enable_grad():
+                        latents = latents.clone().detach().requires_grad_(True)
+
+                        # train all layers has no such big memory cost
+                        self.set_train_transform_layer(boxConfig.train_layer)
+
+                        # Forward pass of denoising with text conditioning
+                        noise_pred_text = self.transformer(
+                            hidden_states=latents,
+                            timestep=timestep / 1000,
+                            guidance=guidance,
+                            encoder_hidden_states_mask=prompt_embeds_mask,
+                            encoder_hidden_states=prompt_embeds,
+                            img_shapes=img_shapes,
+                            # txt_seq_lens=negative_txt_seq_lens,
+                            regional_txt_seq_lens=txt_seq_lens,
+                            attention_kwargs=self.attention_kwargs,
+                            return_dict=False,
+                        )[0]
+
+                        self.transformer.zero_grad()
+
+                        # Get max activation value for each subject token
+                        max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._aggregate_and_get_max_attention_per_token(
+                            attention_store=attention_store,
+                            indices_to_alter=quote_to_token_positions,
+                            gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
+                            shape = (height,width,self.vae_scale_factor*2),
+                            bbox=attention_kwargs.get("regional_boxes")
+                        )
+
+                        # Perform gradient update # 此处是几个局部的差值算了一个总的loss,然后该loss应用于全局，这样是否合理？存在问题，需要改进
+                        if i < boxConfig.max_iter_to_alter:
+                            loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
+                            if loss != 0:
+                                latents = self._update_latent(latents=latents, loss=loss,
+                                                                step_size=boxConfig.scale_factor * np.sqrt(scale_range[i]))
+
+                        # Refinement from attend-and-excite (not necessary)
+                        if True:
+
+                            # loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
+
+                            if i in boxConfig.thresholds.keys() and loss_fg > 1. - boxConfig.thresholds.get(i) and boxConfig.refine:
+                                del noise_pred_text
+                                torch.cuda.empty_cache()
+                                latents = self._perform_iterative_refinement_step(
+                                    latents=latents,
+                                    encoder_hidden_states_mask=prompt_embeds_mask,
+                                    encoder_hidden_states=prompt_embeds,
+                                    img_shapes=img_shapes,
+                                    regional_txt_seq_lens=txt_seq_lens,
+                                    indices_to_alter=quote_to_token_positions,
+                                    loss_fg=loss_fg,
+                                    threshold=boxConfig.thresholds.get(i),
+                                    attention_store=attention_store,
+                                    step_size= boxConfig.scale_factor * np.sqrt(scale_range[i]),
+                                    timestep=timestep,
+                                    guidance=guidance,  # use a larger guidance scale for refinement
+                                    max_refinement_steps=boxConfig.max_refinement_steps
+                                )
+                        
+                        
+                        boxConfig.switch_box_loss = False
+
+                       
+
+
+
                 if self.interrupt:
                     continue
 
@@ -544,15 +1092,13 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                     chosen_prompt_embeds = regional_embeds
                     chosen_prompt_embeds_mask = regional_embeds_mask
                     base_ratio = attention_kwargs['base_ratio']
+                    infer_attention_kwargs["regional_attention_mask"] = regional_attention_mask
                 else:
                     chosen_prompt_embeds = prompt_embeds
                     chosen_prompt_embeds_mask = prompt_embeds_mask
                     regional_txt_seq_lens = txt_seq_lens
                     base_ratio = None
 
-                self._current_timestep = t
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):
                     noise_pred = self.transformer(
                         hidden_states=latents,
@@ -566,13 +1112,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                         img_shapes=img_shapes,
                         txt_seq_lens=txt_seq_lens,
                         regional_txt_seq_lens=regional_txt_seq_lens,
-                        attention_kwargs={ # regional prompts kwargs -> add
-                        # 'single_inject_blocks_interval': attention_kwargs['single_inject_blocks_interval'] if 'single_inject_blocks_interval' in attention_kwargs else len(self.transformer.transformer_blocks), 
-                        'double_inject_blocks_interval': attention_kwargs['double_inject_blocks_interval'] if 'double_inject_blocks_interval' in attention_kwargs else len(self.transformer.transformer_blocks),
-                        'regional_attention_mask': regional_attention_mask if base_ratio is not None else None,
-                        "whole_regional_mask": attention_kwargs["whole_regional_mask"],  # 是否在相乘的时候只在mask上进行
-                        "enable_whole_regional_mask": attention_kwargs["enable_whole_regional_mask"]
-                        },
+                        attention_kwargs=infer_attention_kwargs,
                         return_dict=False,
                     )[0]
 

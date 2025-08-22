@@ -299,6 +299,9 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
 
             def _gradient_checkpointing_func(module, *args):
                 ckpt_kwargs = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                # 添加 debug=True 以启用详细错误信息
+                # 开启调试模式使得速度大大降低
+                # ckpt_kwargs['debug'] = True  # 🔥 关键：开启调试模式
                 return torch.utils.checkpoint.checkpoint(
                     module.__call__,
                     *args,

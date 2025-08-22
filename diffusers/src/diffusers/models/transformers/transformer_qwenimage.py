@@ -33,6 +33,7 @@ from ..embeddings import TimestepEmbedding, Timesteps
 from ..modeling_outputs import Transformer2DModelOutput
 from ..modeling_utils import ModelMixin
 from ..normalization import AdaLayerNormContinuous, RMSNorm
+from util.tool import cost_time
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -556,6 +557,7 @@ class QwenImageTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Fro
 
         self.gradient_checkpointing = False
 
+    @cost_time
     def forward(
         self,
         hidden_states: torch.Tensor,
