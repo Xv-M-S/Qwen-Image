@@ -13,6 +13,8 @@ pip install transformers==4.55.0
 pip install -r requirements.txt
 
 pip install matplotlib
+pip install torchviz
+pip install scikit-learn
 
 pip install accelerate
 ```
@@ -50,4 +52,11 @@ python examples/demo.py
 mainly test inject_steps and base_ration parameters 
 ``` bash
 python hyperParamExp.py
+```
+
+# test boxLoss Control
+
+you can edit the boxLossConfig.py to change the input parameters
+``` bash
+python boxLossControlStart.py
 ```

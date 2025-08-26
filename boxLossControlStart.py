@@ -6,6 +6,7 @@ import torch
 from pyinstrument import Profiler
 from util.tool import draw_masks_on_image, visualize_mask_pairs
 import os
+from config.boxLossConfig import boxConfig
 
 ENABLE_PROFILER = False
 
@@ -72,6 +73,9 @@ def get_hw():
 
     width, height = aspect_ratios["16:9"]
 
+    boxConfig.H = height
+    boxConfig.W = width
+
     return height, width
 
 def prepare_regional_control(height, width):
@@ -79,7 +83,7 @@ def prepare_regional_control(height, width):
     regional_prompt_mask_pairs = {
         "0": {
             "description": ''' a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" ''',
-            "mask": [128, 128, 384, 640]
+            "mask": [128, 240, 384, 640]
         },
         "1": {
             "description": ''' a plaque sign "通义千问" ''',
@@ -121,6 +125,7 @@ def prepare_regional_control(height, width):
 def prepare_base_control():
     # base prompt settings
     base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup", and a neon light  displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197".  '''
+    base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup", and a neon light  displaying "通义千问". A poster showing a beautiful Chinese woman, and "π≈3.1415926-53589793-23846264-33832795-02384197" is written on the wall.'''
     # base_prompt = '''A coffee shop entrance, '''
 
     negative_prompt = " " # Recommended if you don't use a negative prompt.
@@ -134,7 +139,7 @@ def prepare_base_control():
 
 def run():
     ## region control factor settings [超参数]
-    mask_inject_steps = 20 # larger means stronger control, recommended between 5-10
+    mask_inject_steps = 0 # larger means stronger control, recommended between 5-10
     double_inject_blocks_interval = 1 # 1 means strongest control
     # single_inject_blocks_interval = 1 # 1 means strongest control
     base_ratio = 0.1 # smaller means stronger control

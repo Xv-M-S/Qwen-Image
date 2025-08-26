@@ -8,6 +8,7 @@ from matplotlib.patches import Rectangle, Patch
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
+from config.boxLossConfig import boxConfig
 
 # 获取当前文件的绝对路径
 current_file_path = os.path.abspath(__file__)
@@ -21,13 +22,14 @@ def cost_time(func):
     def fun(*args, **kwargs):
         t = time.perf_counter()
         result = func(*args, **kwargs)
-        print(f'func {func.__name__} cost time:{time.perf_counter() - t:.8f} s')
+        if boxConfig.print_cost_time:
+            print(f'func {func.__name__} cost time:{time.perf_counter() - t:.8f} s')
         return result
 
     return fun
 
 
-# 可视化指定的layout
+# 可视化指定的输入layout
 def visualize_mask_pairs(mask_pairs, width, height, output_path="visual_layout.png"):
     # 创建一个白色背景的图像
     fig, ax = plt.subplots(1, figsize=(width/100, height/100), dpi=100)
@@ -84,6 +86,7 @@ def visualize_mask_pairs(mask_pairs, width, height, output_path="visual_layout.p
     plt.close(fig)
 
 
+# 在生成的图像上可视化layout，看生成的图像是否符合layout的布局要求
 def draw_masks_on_image(image_path, regional_prompt_mask_pairs, output_path='output_image.jpg'):
     # 打开图像
     image = Image.open(image_path)

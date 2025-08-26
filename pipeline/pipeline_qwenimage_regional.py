@@ -13,6 +13,9 @@ import re
 from pipeline.gaussion_smoothing import GaussianSmoothing
 from config.boxLossConfig import boxConfig
 from util.tool import cost_time
+from torchviz import make_dot
+from util.visual import visualize_feature_activation, visualize_feature_channel, visualize_latent_map
+
 
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
@@ -193,6 +196,10 @@ class RegionalQwenImageAttnProcessor:
             img_txt_attn = img_txt_attn.mean(dim=1)  # Average over heads -> [B, S_img, S_txt]
             is_cross = True
             self.attnstore(img_txt_attn, is_cross)
+            if img_txt_attn.shape[2] == boxConfig.text_len and boxConfig.visual_attention_map:
+                # no viusal of negative prompt
+                visualize_feature_activation(img_txt_attn.clone().detach(), index_block)
+                visualize_feature_channel(img_txt_attn.clone().detach(), index_block)
 
         # Reshape back
         joint_hidden_states = joint_hidden_states.transpose(1, 2).flatten(2, 3)  # [B, S_joint, H*D]
@@ -471,7 +478,80 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         out = out.sum(0) / out.shape[0]
         return out
     
+
     def _compute_max_attention_per_index(self,
+                                        attention_maps: torch.Tensor,
+                                        indices_to_alter: List[int],
+                                        smooth_attentions: bool = False,
+                                        shape: Optional[Tuple[int, int, int]] = None,
+                                        sigma: float = 0.5,
+                                        kernel_size: int = 3,
+                                        bbox: List[int] = None,
+                                        ) -> List[torch.Tensor]:
+        """ Computes the maximum attention value for each of the tokens we wish to alter. """
+        # QwenVL 截断了 eot token,第一个便是有效字符 -> 旧实现见 _compute_max_attention_per_index_old
+        attention_for_text = attention_maps
+        # attention_for_text = attention_for_text * 100
+        # attention_for_text = torch.nn.functional.softmax(attention_for_text, dim=-1)
+        # attention_for_text = attention_for_text * 100
+        # attention_sum = attention_for_text.sum(dim=-1)
+
+        # Extract the maximum values
+        max_indices_list_fg = []
+        # for fit the old implementation, define but not used
+        max_indices_list_bg = []
+        dist_x = []
+        dist_y = []
+
+        height, width, scale_factor = shape
+
+        cnt = 0
+        """
+            情况不一样 -> boxdiff是一个框只有一个token描述,而我们一个框有多个token描述,此处有待改进
+        """
+        for cnt, indices in enumerate(indices_to_alter):
+            image_list = []
+
+            for i in indices:
+                image = attention_for_text[:, :, i]
+                image_list.append(image)
+
+            image_mean = torch.stack(image_list).mean(dim=0)
+            # 基于极大极小值进行归一化
+            image_mean = (image_mean - image_mean.min()) / (image_mean.max() - image_mean.min() + + 1e-8)
+
+            box = [max(round(b/scale_factor), 0) for b in bbox[cnt]]
+            x1, y1, x2, y2 = box
+
+            # coordinates to masks
+            obj_mask = torch.zeros_like(image_mean)
+            ones_mask = torch.ones([y2 - y1, x2 - x1], dtype=obj_mask.dtype).to(obj_mask.device)
+            obj_mask[y1:y2, x1:x2] = ones_mask
+            bg_mask = 1 - obj_mask
+
+            if smooth_attentions:
+                smoothing = GaussianSmoothing(channels=1, kernel_size=kernel_size, sigma=sigma, dim=2).cuda()
+                input = F.pad(image_mean.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode='reflect')
+                image = smoothing(input).squeeze(0).squeeze(0)
+
+            # Inner-Box constraint
+            inner_pix_num = obj_mask.sum()
+            inner_pix_avg = (image_mean * obj_mask).sum() /inner_pix_num
+
+
+            # Outer-Box constraint
+            outer_pix_num = bg_mask.sum()
+            outer_pix_avg = (image_mean * bg_mask).sum() /outer_pix_num
+
+            diff = inner_pix_avg - outer_pix_avg
+            loss = - torch.log(torch.sigmoid(diff) + 1e-8)
+
+            max_indices_list_fg.append(loss)
+
+        return max_indices_list_fg, max_indices_list_bg, dist_x, dist_y
+
+            
+    def _compute_max_attention_per_index_old(self,
                                         attention_maps: torch.Tensor,
                                         indices_to_alter: List[int],
                                         smooth_attentions: bool = False,
@@ -490,7 +570,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         # attention_for_text = attention_maps[:, :, 1:last_idx]
         # QwenVL 截断了 eot token,第一个便是有效字符
         attention_for_text = attention_maps
-        attention_for_text *= 100
+        attention_for_text = attention_for_text * 100
         attention_for_text = torch.nn.functional.softmax(attention_for_text, dim=-1)
 
         # Shift indices since we removed the first token
@@ -583,27 +663,37 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
 
     @staticmethod
     @cost_time
-    def _compute_loss(max_attention_per_index_fg: List[torch.Tensor], max_attention_per_index_bg: List[torch.Tensor],
+    def _compute_loss_old(max_attention_per_index_fg: List[torch.Tensor], max_attention_per_index_bg: List[torch.Tensor],
                       dist_x: List[torch.Tensor], dist_y: List[torch.Tensor], return_losses: bool = False) -> torch.Tensor:
         """ Computes the attend-and-excite loss using the maximum attention value for each token. """
         losses_fg = [max(0, 1. - curr_max) for curr_max in max_attention_per_index_fg]
         losses_bg = [max(0, curr_max) for curr_max in max_attention_per_index_bg]
         loss = sum(losses_fg) + sum(losses_bg) + sum(dist_x) + sum(dist_y)
-        print("losses_fg:", max(losses_fg))
+        print(f"losses_fg: {max(losses_fg)} loss_bg:{max(losses_bg)} , loss:{loss}")
         if return_losses:
             return max(losses_fg), losses_fg
         else:
             return max(losses_fg), loss
+        
+    def _compute_loss(self, max_attention_per_index_fg: List[torch.Tensor], max_attention_per_index_bg: List[torch.Tensor],
+                      dist_x: List[torch.Tensor], dist_y: List[torch.Tensor], return_losses: bool = False) -> torch.Tensor:
+        """ Computes the attend-and-excite loss using the maximum attention value for each token. """
+        loss = sum(max_attention_per_index_fg)
+        print(f"loss: {loss}")
+        return loss, loss
     
     @staticmethod
     @cost_time
     def _update_latent(latents: torch.Tensor, loss: torch.Tensor, step_size: float) -> torch.Tensor:
         """ Update the latent according to the computed loss. """
         grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents], retain_graph=True)[0]
+        # 1. 全局归一化（最推荐）
+        # grad_cond = grad_cond / (grad_cond.norm() + 1e-8)
+        # 2. 最大最小值归一化
+        # grad_cond = (grad_cond - grad_cond.min()) / (grad_cond.max() - grad_cond.min() + 1e-8)
+        # 3. 均值归一化 -> 这种归一化能放大梯度，同时不改变梯度的分布（核心思想：不改变梯度的比例系数、分布的情况下，合理的放大梯度）
+        grad_cond = (grad_cond - grad_cond.mean()) / (grad_cond.std() + 1e-8)
         latents = latents - step_size * grad_cond
-        # grad_cond = torch.autograd.grad(loss, [latents], retain_graph=False)[0]
-        # with torch.no_grad():
-        #     latents = latents - step_size * grad_cond
         return latents
         
 
@@ -840,6 +930,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
         )
+        boxConfig.text_len = prompt_embeds.shape[1]
         if do_true_cfg:
             negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
                 prompt=negative_prompt,
@@ -1005,10 +1096,17 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
             "enable_whole_regional_mask": attention_kwargs["enable_whole_regional_mask"]
         }
 
+        # add some args for visualization
+        boxConfig.text_index = quote_to_token_positions
+        boxConfig.bbox = attention_kwargs.get("regional_boxes")
+
+
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                boxConfig.now_step = i
+
                 self._current_timestep = t
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
@@ -1051,7 +1149,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                         if i < boxConfig.max_iter_to_alter:
                             loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
                             if loss != 0:
-                                latents = self._update_latent(latents=latents, loss=loss,
+                                latents = self._update_latent(latents=latents, loss=loss_fg, # 原实现此处用loss
                                                                 step_size=boxConfig.scale_factor * np.sqrt(scale_range[i]))
 
                         # Refinement from attend-and-excite (not necessary)
@@ -1157,6 +1255,10 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+
+                    
+                if boxConfig.visual_middle_res:
+                    visualize_latent_map(self, latents.clone().detach(), height, width, i)
 
                 if XLA_AVAILABLE:
                     xm.mark_step()
