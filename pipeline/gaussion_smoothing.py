@@ -18,7 +18,13 @@ class GaussianSmoothing(nn.Module):
         dim (int, optional): The number of dimensions of the data.
             Default value is 2 (spatial).
     """
-    def __init__(self, channels, kernel_size, sigma, dim=2):
+    def __init__(       
+            self, 
+            channels: int = 1,
+            kernel_size: int = 3,
+            sigma: float = 0.5,
+            dim: int = 2
+        ):
         super(GaussianSmoothing, self).__init__()
         if isinstance(kernel_size, numbers.Number):
             kernel_size = [kernel_size] * dim

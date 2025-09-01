@@ -82,17 +82,21 @@ def prepare_regional_control(height, width):
     ## regional prompt and mask settings
     regional_prompt_mask_pairs = {
         "0": {
-            "description": ''' a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" ''',
+            "description": '''a chalkboard sign reading "Qwen Coffee 😊 $2 per cup"''',
             "mask": [128, 240, 384, 640]
         },
         "1": {
-            "description": ''' a plaque sign "通义千问" ''',
-            "mask": [500, 48, 756, 112]
+            "description": '''a neon light  displaying "通义千问"''',
+            "mask": [500, 48, 840, 160]
         },
         "2": {
-            "description": ''' a poster is written "π≈3.1415926-53589793-23846264-33832795-02384197" ''',
+            "description": '''"π≈3.1415926-53589793-23846264-33832795-02384197" is written on the wall''',
             "mask": [500, 640, 756, 780]
-        }
+        },
+        # "3":{
+        #     "description" : '''A poster showing a beautiful Chinese woman''',
+        #     "mask": [900, 280, 1280, 680]
+        # }
     }
 
     regional_prompts = []
@@ -125,7 +129,7 @@ def prepare_regional_control(height, width):
 def prepare_base_control():
     # base prompt settings
     base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup", and a neon light  displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197".  '''
-    base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup", and a neon light  displaying "通义千问". A poster showing a beautiful Chinese woman, and "π≈3.1415926-53589793-23846264-33832795-02384197" is written on the wall.'''
+    base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" , and a neon light  displaying "通义千问" . A poster showing a beautiful Chinese woman , and "π≈3.1415926-53589793-23846264-33832795-02384197" is written on the wall .'''
     # base_prompt = '''A coffee shop entrance, '''
 
     negative_prompt = " " # Recommended if you don't use a negative prompt.

@@ -15,6 +15,9 @@ from config.boxLossConfig import boxConfig
 from util.tool import cost_time
 from torchviz import make_dot
 from util.visual import visualize_feature_activation, visualize_feature_channel, visualize_latent_map
+from pipeline.lossDesign import compute_diff_loss
+from pipeline.rnbLoss import compute_rnb_loss
+from util.latent_search import histogram_matching
 
 
 def apply_rotary_emb_qwen(
@@ -194,8 +197,11 @@ class RegionalQwenImageAttnProcessor:
             # joint_key:   [txt_key,   img_key]   -> txt_key ends at seq_txt
             img_txt_attn = attn_probs[:, :, seq_txt:, :seq_txt]  # [B, H, S_img, S_txt]
             img_txt_attn = img_txt_attn.mean(dim=1)  # Average over heads -> [B, S_img, S_txt]
-            is_cross = True
-            self.attnstore(img_txt_attn, is_cross)
+            self.attnstore(img_txt_attn, "img-to-txt")
+            
+            txt_img_attn = attn_probs[:, :, :seq_txt, seq_txt:]
+            txt_img_attn = txt_img_attn.mean(dim=1)
+            self.attnstore(txt_img_attn, "txt-to-img")
             if img_txt_attn.shape[2] == boxConfig.text_len and boxConfig.visual_attention_map:
                 # no viusal of negative prompt
                 visualize_feature_activation(img_txt_attn.clone().detach(), index_block)
@@ -392,13 +398,16 @@ class RegionalQwenImageAttnProcessor:
 
 class RegionalQwenImagePipeline(QwenImagePipeline):
 
-    def get_token_index(self, prompt, quote_prompt):
+    def get_token_index(self, prompt, quote_prompt, region_prompts):
         # 对基础提示进行 tokenization
         # 步骤 1: 提取所有双引号内的内容（保留原样）
-        print("🔍 提取的引号内容:")
-        quoted_texts = re.findall(r'"(.*?)"', prompt)
-        for i, text in enumerate(quoted_texts):
-            print(f"  [{i}] {repr(text)}")
+        if region_prompts==None:
+            print("🔍 提取的引号内容:")
+            quoted_texts = re.findall(r'"(.*?)"', prompt)
+            for i, text in enumerate(quoted_texts):
+                print(f"  [{i}] {repr(text)}")
+        else:
+            quoted_texts = region_prompts
         
         # 步骤 2: Tokenize 整个 prompt
         tokens = self.tokenizer.tokenize(prompt)
@@ -417,6 +426,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
             # 将引号内容单独 tokenize
             quote_tokens = self.tokenizer.tokenize(quote)
             quote_token_ids = self.tokenizer.convert_tokens_to_ids(quote_tokens)
+            quote_token_ids = quote_token_ids[1:] # 去掉开一个字符
 
             print(f"  Tokenized 子串: {quote_tokens}")
             print(f"  Token IDs: {quote_token_ids}")
@@ -432,7 +442,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                     reconstructed = self.tokenizer.decode(token_ids[start_idx:end_idx])
                     print(f"  🔁 重建文本: {repr(reconstructed)}")
                     found = True
-                    positions = list(range(start_idx, end_idx))
+                    positions = list(range(start_idx - 1, end_idx)) # 加一个字符
                     break
 
             if positions is not None:
@@ -684,16 +694,46 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
     
     @staticmethod
     @cost_time
-    def _update_latent(latents: torch.Tensor, loss: torch.Tensor, step_size: float) -> torch.Tensor:
+    def _update_latent(latents: torch.Tensor, loss: torch.Tensor, loss_list: list[torch.Tensor] ,step_size: float) -> torch.Tensor:
         """ Update the latent according to the computed loss. """
-        grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents], retain_graph=True)[0]
-        # 1. 全局归一化（最推荐）
-        # grad_cond = grad_cond / (grad_cond.norm() + 1e-8)
-        # 2. 最大最小值归一化
-        # grad_cond = (grad_cond - grad_cond.min()) / (grad_cond.max() - grad_cond.min() + 1e-8)
-        # 3. 均值归一化 -> 这种归一化能放大梯度，同时不改变梯度的分布（核心思想：不改变梯度的比例系数、分布的情况下，合理的放大梯度）
-        grad_cond = (grad_cond - grad_cond.mean()) / (grad_cond.std() + 1e-8)
-        latents = latents - step_size * grad_cond
+        if boxConfig.use_global_box_loss:
+            grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents], retain_graph=True)[0]
+            # 1. 全局归一化（最推荐）
+            # grad_cond = grad_cond / (grad_cond.norm() + 1e-8)
+            # 2. 最大最小值归一化
+            # grad_cond = (grad_cond - grad_cond.min()) / (grad_cond.max() - grad_cond.min() + 1e-8)
+            # 3. 均值归一化 -> 这种归一化能放大梯度，同时不改变梯度的分布（核心思想：不改变梯度的比例系数、分布的情况下，合理的放大梯度）
+            grad_cond = (grad_cond - grad_cond.mean()) / (grad_cond.std() + 1e-8)
+            latents = latents - step_size * grad_cond
+            if boxConfig.latents_gaussian:
+                with torch.no_grad():
+                    # latents = (latents - latents.mean()) / (latents.std() + 1e-8)
+                    latents_old = latents.clone().detach()
+                    # print(latents_old.min().item(), latents_old.max().item())
+                    latents_new = histogram_matching(latents_old, device=latents.device, dtype = latents.dtype)
+                    latents_new.clone().detach().requires_grad_(True)
+                    # print(latents_new.min().item(), latents_new.max().item())
+                    return latents_new
+        else:
+            # 1.针对每一个box的loss计算梯度
+            grad_conds = []
+            for loss_fg in loss_list:
+                grad_cond = torch.autograd.grad(loss_fg.requires_grad_(True), [latents], retain_graph=True)[0]
+                grad_conds.append(grad_cond)  
+            # 2.求梯度平均值
+            grad_cond = sum(grad_conds) / len(grad_conds)
+            # 3. 均值归一化 -> 这种归一化能放大梯度，同时不改变梯度的分布（核心思想：不改变梯度的比例系数、分布的情况下，合理的放大梯度）
+            grad_cond = (grad_cond - grad_cond.mean()) / (grad_cond.std() + 1e-8)
+            latents = latents - step_size * grad_cond
+            if boxConfig.latents_gaussian:
+                with torch.no_grad():
+                    # latents = (latents - latents.mean()) / (latents.std() + 1e-8)
+                    latents_old = latents.clone().detach()
+                    # print(latents_old.min().item(), latents_old.max().item())
+                    latents_new = histogram_matching(latents_old, device=latents.device, dtype = latents.dtype)
+                    latents_new.clone().detach().requires_grad_(True)
+                    # print(latents_new.min().item(), latents_new.max().item())
+                    return latents_new
         return latents
         
 
@@ -738,18 +778,35 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
             self.transformer.zero_grad()
 
             # Get max activation value for each subject token
-            max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._aggregate_and_get_max_attention_per_token(
-                attention_store=attention_store,
-                indices_to_alter=indices_to_alter,
-                gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
-                shape = (self._height ,self._width ,self.vae_scale_factor*2),
-                bbox=self.attention_kwargs.get("regional_boxes")
-            )
+            # max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._aggregate_and_get_max_attention_per_token(
+            #     attention_store=attention_store,
+            #     indices_to_alter=indices_to_alter,
+            #     gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
+            #     shape = (self._height ,self._width ,self.vae_scale_factor*2),
+            #     bbox=self.attention_kwargs.get("regional_boxes")
+            # )
 
-            loss_fg, losses_fg = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y, return_losses=True)
+            # loss_fg, losses_fg = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y, return_losses=True)
+
+            if boxConfig.lossType == "diff":
+                loss_fg, loss_list = compute_diff_loss(
+                    attention_store=attention_store,
+                    indices_to_alter=indices_to_alter,
+                    gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
+                    shape = (self._height ,self._width ,self.vae_scale_factor*2),
+                    bbox=self.attention_kwargs.get("regional_boxes")
+                )
+            elif boxConfig.lossType == "rnb":
+                loss_fg, loss_list = compute_rnb_loss(
+                    attention_store=attention_store,
+                    indices_to_alter=indices_to_alter,
+                    gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
+                    shape = (self._height ,self._width ,self.vae_scale_factor*2),
+                    bbox=self.attention_kwargs.get("regional_boxes")
+                )
 
             if loss_fg != 0:  # 此处算出来的梯度特别小，导致loss_fg基本没更新
-                latents = self._update_latent(latents, loss_fg, step_size)
+                latents = self._update_latent(latents, loss_fg, loss_list, step_size)
 
         
             if iteration >= max_refinement_steps:
@@ -903,7 +960,7 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
 
         # get quote prompt token index
         if isinstance(base_prompt, str) and '"' in base_prompt:
-            quote_to_token_positions = self.get_token_index(base_prompt, quote_prompt=True)
+            quote_to_token_positions = self.get_token_index(base_prompt, quote_prompt=True, region_prompts = attention_kwargs.get("regional_prompts", None)[:-1])
             print("🔗 引号内容对应的 token 位置:", quote_to_token_positions)
         else:
             quote_to_token_positions = None
@@ -1112,9 +1169,11 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 # 基于局部梯度更新latents，使得初始latents的布局更符合区域提示的要求
-                if i < boxConfig.max_iter_to_alter:
+                if i in boxConfig.max_iter_to_alter:
                     boxConfig.switch_box_loss = True
                     with torch.enable_grad():
+                        # 在训练循环开始前启用
+                        # torch.autograd.set_detect_anomaly(True)
                         latents = latents.clone().detach().requires_grad_(True)
 
                         # train all layers has no such big memory cost
@@ -1136,48 +1195,64 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
 
                         self.transformer.zero_grad()
 
-                        # Get max activation value for each subject token
-                        max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._aggregate_and_get_max_attention_per_token(
-                            attention_store=attention_store,
-                            indices_to_alter=quote_to_token_positions,
-                            gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
-                            shape = (height,width,self.vae_scale_factor*2),
-                            bbox=attention_kwargs.get("regional_boxes")
-                        )
-
                         # Perform gradient update # 此处是几个局部的差值算了一个总的loss,然后该loss应用于全局，这样是否合理？存在问题，需要改进
-                        if i < boxConfig.max_iter_to_alter:
-                            loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
-                            if loss != 0:
-                                latents = self._update_latent(latents=latents, loss=loss_fg, # 原实现此处用loss
-                                                                step_size=boxConfig.scale_factor * np.sqrt(scale_range[i]))
-
-                        # Refinement from attend-and-excite (not necessary)
-                        if True:
+                        if i in boxConfig.max_iter_to_alter:
+                            # Get max activation value for each subject token
+                            # max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y = self._aggregate_and_get_max_attention_per_token(
+                            #     attention_store=attention_store,
+                            #     indices_to_alter=quote_to_token_positions,
+                            #     gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
+                            #     shape = (height,width,self.vae_scale_factor*2),
+                            #     bbox=attention_kwargs.get("regional_boxes")
+                            # )
 
                             # loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
-
-                            if i in boxConfig.thresholds.keys() and loss_fg > 1. - boxConfig.thresholds.get(i) and boxConfig.refine:
-                                del noise_pred_text
-                                torch.cuda.empty_cache()
-                                latents = self._perform_iterative_refinement_step(
-                                    latents=latents,
-                                    encoder_hidden_states_mask=prompt_embeds_mask,
-                                    encoder_hidden_states=prompt_embeds,
-                                    img_shapes=img_shapes,
-                                    regional_txt_seq_lens=txt_seq_lens,
-                                    indices_to_alter=quote_to_token_positions,
-                                    loss_fg=loss_fg,
-                                    threshold=boxConfig.thresholds.get(i),
+                            if boxConfig.lossType == "diff":
+                                loss_fg, loss_list = compute_diff_loss(
                                     attention_store=attention_store,
-                                    step_size= boxConfig.scale_factor * np.sqrt(scale_range[i]),
-                                    timestep=timestep,
-                                    guidance=guidance,  # use a larger guidance scale for refinement
-                                    max_refinement_steps=boxConfig.max_refinement_steps
+                                    indices_to_alter=quote_to_token_positions,
+                                    gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
+                                    shape = (height,width,self.vae_scale_factor*2),
+                                    bbox=attention_kwargs.get("regional_boxes")
                                 )
+                            elif boxConfig.lossType == "rnb":
+                                loss_fg, loss_list = compute_rnb_loss(
+                                    attention_store=attention_store,
+                                    indices_to_alter=quote_to_token_positions,
+                                    gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
+                                    shape = (height,width,self.vae_scale_factor*2),
+                                    bbox=attention_kwargs.get("regional_boxes")
+                                )
+                            if loss_fg != 0:
+                                latents = self._update_latent(latents=latents, loss=loss_fg, loss_list = loss_list, # 原实现此处用loss
+                                                                step_size=boxConfig.scale_factor * np.sqrt(scale_range[i]))
+
+                            # Refinement from attend-and-excite (not necessary)
+                            if True:
+
+                                # loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
+
+                                if i in boxConfig.thresholds.keys() and loss_fg > 1. - boxConfig.thresholds.get(i) and boxConfig.refine:
+                                    del noise_pred_text
+                                    torch.cuda.empty_cache()
+                                    latents = self._perform_iterative_refinement_step(
+                                        latents=latents,
+                                        encoder_hidden_states_mask=prompt_embeds_mask,
+                                        encoder_hidden_states=prompt_embeds,
+                                        img_shapes=img_shapes,
+                                        regional_txt_seq_lens=txt_seq_lens,
+                                        indices_to_alter=quote_to_token_positions,
+                                        loss_fg=loss_fg,
+                                        threshold=boxConfig.thresholds.get(i),
+                                        attention_store=attention_store,
+                                        step_size= boxConfig.scale_factor * np.sqrt(scale_range[i]),
+                                        timestep=timestep,
+                                        guidance=guidance,  # use a larger guidance scale for refinement
+                                        max_refinement_steps=boxConfig.max_refinement_steps.get(i,0)
+                                    )
                         
                         
-                        boxConfig.switch_box_loss = False
+                    boxConfig.switch_box_loss = False
 
                        
 

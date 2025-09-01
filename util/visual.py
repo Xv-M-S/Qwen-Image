@@ -38,8 +38,10 @@ def visualize_feature_activation(feature, index):
     plt.axis('off')
 
     # 保存图片到指定路径
-    boxConfig.now_step = 0
-    output_path = os.path.join(current_dir_path,f"../runing_output_tempfile/feature_map/feature_activation_map_all_{index}_{boxConfig.now_step}.png")
+    output_dir = os.path.join(current_dir_path,f"../runing_output_tempfile/feature_map/activate_{boxConfig.now_step}")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    output_path = os.path.join(output_dir,f"feature_activation_map_all_{index}.png")
     plt.savefig(output_path, dpi=300, bbox_inches='tight')  # 高分辨率保存
 
     plt.close()
@@ -101,11 +103,12 @@ def visualize_feature_channel(feature, index):
     plt.tight_layout()
     
     # 保存
-    output_path = os.path.join(current_dir_path,f"../runing_output_tempfile/feature_map/feature_activation_map_text_{index}.png")
+    output_dir = os.path.join(current_dir_path,f"../runing_output_tempfile/feature_map/activate_{boxConfig.now_step}")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    output_path = os.path.join(output_dir,f"feature_activation_map_text_{index}.png")
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-
-    # print(f"✅ Saved feature map grid to {output_path}")
 
 
 # 可视化去噪过程中的中间步骤的图像
@@ -125,8 +128,6 @@ def visualize_latent_map(pipe, latents, height, width, index, output_type: Optio
     image = pipe.image_processor.postprocess(image, output_type=output_type)
 
     save_image = QwenImagePipelineOutput(images=image).images[0]
-
-    # print(save_image)
 
     save_path = os.path.join(current_dir_path,f"../runing_output_tempfile/feature_map/middle_image_visual_{index}.png")
     save_image.save(save_path)

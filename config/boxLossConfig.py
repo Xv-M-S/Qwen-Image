@@ -5,20 +5,15 @@ from typing import Dict, List, Optional, Union, Tuple
 
 @dataclass
 class RunConfig:
+
+    # image size
     W: int = 512
     H: int = 512
     now_step: int = 50
     text_len: int = 20
 
-    visual_middle_res: bool = False
-    visual_attention_map: bool = False
-
-    print_cost_time: bool = False
-
-    text_index: Dict[str, List[int]] = field(default_factory=lambda: {"0":[0]})
-    bbox: List[List[int]] = field(default_factory=lambda: [[0, 0, 512, 512]])
-
-    P: float = 0.2
+    # chose percent
+    P: float = 0.01
     # number of pixels around the corner to be selected
     L: int = 1
     # threadhold keys
@@ -26,17 +21,31 @@ class RunConfig:
     # refine
     refine: bool = True
     # update step scale
-    scale_factor: int = 0.01
+    scale_factor: int = 0.020
     scale_range: tuple = field(default_factory=lambda: (1.0, 0.5))
-
-    # Number of denoising steps to apply attend-and-excite
-    max_iter_to_alter: int = 20
-
-    # max refinement steps
-    max_refinement_steps = 35
-
+    bbox: List[List[int]] = field(default_factory=lambda: [[0, 0, 512, 512]])
     # move some model to cpu
     save_cpu_offload: bool = False
+
+    ## new added for box loss
+    # visual veature map
+    visual_middle_res: bool = False
+    visual_attention_map: bool = False
+    # if to print cost time
+    print_cost_time: bool = False
+    # the position of the text
+    text_index: Dict[str, List[int]] = field(default_factory=lambda: {"0":[0]})
+
+    # decided if to use global box loss gradient
+    use_global_box_loss: bool = True
+    latents_gaussian: bool = True  # 由于对初始变量经过超过80次的梯度更新，会导致latents失去语义，猜测由于其偏离了高斯分布
+
+
+    # Number of denoising steps to apply attend-and-excite
+    max_iter_to_alter: List[int] = field(default_factory=lambda: [0])
+
+    # max refinement steps
+    max_refinement_steps: Dict[int, float] = field(default_factory=lambda: {0: 300, 10: 0, 20: 40})
 
     # train_layer
     train_layer: set = field(default_factory=lambda: {
@@ -45,11 +54,15 @@ class RunConfig:
         # "20","21","22","23","24","25","26","27","28","29",
         "30","31","32","33","34","35","36","37","38","39",
         # "40","41","42","43","44","45","46","47","48","49",
-        # "50","51","52","53","54","55","56","57","58","59",
-        # "60","61","62","63","64","65","66","67","68","69"
+        # "50","51","52","53","54","55","56","57","58",
+        # "59" # 最后一层似乎触犯了天条，只要加上就会超内存。。。
     })
 
     # switch
     switch_box_loss: bool = True
+
+    # loss type
+    # lossType = "diff" # "rnb"
+    lossType = "rnb"
 
 boxConfig = RunConfig()

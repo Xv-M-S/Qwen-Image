@@ -41,10 +41,9 @@ class AttentionStore(AttentionControl):
 
     @staticmethod
     def get_empty_store():
-        return {"cross": [], "self": []}
+        return {"img-to-txt": [], "txt-to-img": []}
 
-    def forward(self, attn, is_cross: bool):
-        key = f"{'cross' if is_cross else 'self'}"
+    def forward(self, attn, key: str):
         # for mmdit architecture, we can just use special layer of attention
         self.step_store[key].append(attn)
         return attn
