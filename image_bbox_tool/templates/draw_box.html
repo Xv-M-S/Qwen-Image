@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Interactive Box Drawer with Clean JSON</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #canvasContainer {
+            width: 100%;
+            max-width: 100vw;
+            overflow: auto;
+            margin-top: 10px;
+        }
+        #canvas {
+            border: 2px solid #333;
+            cursor: crosshair;
+            background-color: #f9f9f9;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        .controls {
+            margin-bottom: 10px;
+        }
+        input, button {
+            padding: 5px;
+            margin-right: 10px;
+        }
+        #jsonOutput {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background-color: #f0f0f0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h2>自定义画布尺寸</h2>
+    <div class="controls">
+        宽度: <input type="number" id="canvasWidth" value="800" min="100" max="3000"> px
+        高度: <input type="number" id="canvasHeight" value="600" min="100" max="3000"> px
+        <button onclick="createCanvas()">创建画布</button>
+    </div>
+
+    <div id="canvasContainer"></div>
+
+    <button onclick="exportBoxes()" style="margin-top: 10px;">导出 Boxes (JSON)</button>
+    <div id="jsonOutput"></div>
+
+    <script>
+        let canvas, ctx;
+        let boxes = [];
+        let isDrawing = false;
+        let isDragging = false;
+        let currentBox = null;
+        let selectedBoxIndex = -1;
+
+        // 页面加载后初始化
+        window.onload = function() {
+            createCanvas();
+        };
+
+        function createCanvas() {
+            const width = parseInt(document.getElementById('canvasWidth').value);
+            const height = parseInt(document.getElementById('canvasHeight').value);
+
+            if (isNaN(width) || isNaN(height) || width < 100 || height < 100) {
+                alert("请输入有效的宽度和高度（至少100）");
+                return;
+            }
+
+            // 清空容器
+            const container = document.getElementById('canvasContainer');
+            container.innerHTML = '';
+
+            // 创建新画布
+            canvas = document.createElement('canvas');
+            canvas.id = 'canvas';
+            canvas.width = width;
+            canvas.height = height;
+            container.appendChild(canvas);
+
+            // 自适应屏幕大小
+            const maxWidth = window.innerWidth * 0.95;
+            if (width > maxWidth) {
+                canvas.style.width = maxWidth + 'px';
+                canvas.style.height = (maxWidth / width * height) + 'px';
+            }
+
+            ctx = canvas.getContext('2d');
+
+            // 重置状态
+            boxes = [];
+            redraw();
+
+            // 绑定事件
+            canvas.addEventListener('mousedown', startAction);
+            canvas.addEventListener('mousemove', performAction);
+            canvas.addEventListener('mouseup', endAction);
+        }
+
+        function startAction(e) {
+            const rect = canvas.getBoundingClientRect();
+            const offsetX = e.clientX - rect.left;
+            const offsetY = e.clientY - rect.top;
+
+            // 检查是否点击了已有 box
+            for (let i = boxes.length - 1; i >= 0; i--) {
+                const b = boxes[i];
+                if (offsetX >= b.x && offsetX <= b.x + b.w &&
+                    offsetY >= b.y && offsetY <= b.y + b.h) {
+                    isDragging = true;
+                    selectedBoxIndex = i;
+                    currentBox = { ...b };
+                    return;
+                }
+            }
+
+            // 否则开始绘制新 box
+            isDrawing = true;
+            currentBox = { x: offsetX, y: offsetY, w: 0, h: 0 };
+        }
+
+        function performAction(e) {
+            if (!canvas || !ctx) return;
+            const rect = canvas.getBoundingClientRect();
+            const offsetX = e.clientX - rect.left;
+            const offsetY = e.clientY - rect.top;
+
+            if (isDrawing) {
+                currentBox.w = offsetX - currentBox.x;
+                currentBox.h = offsetY - currentBox.y;
+                redraw();
+            } else if (isDragging) {
+                const dx = offsetX - (currentBox.x + currentBox.w / 2);
+                const dy = offsetY - (currentBox.y + currentBox.h / 2);
+                currentBox.x += dx;
+                currentBox.y += dy;
+                boxes[selectedBoxIndex] = { ...currentBox };
+                redraw();
+            }
+        }
+
+        function endAction() {
+            if (isDrawing) {
+                let { x, y, w, h } = currentBox;
+
+                // 修正负宽高
+                if (w < 0) {
+                    x += w;
+                    w = -w;
+                }
+                if (h < 0) {
+                    y += h;
+                    h = -h;
+                }
+
+                // 必须宽高 > 5 才视为有效 box
+                if (w > 5 && h > 5) {
+                    // 弹出输入框，要求输入描述（必填）
+                    let desc = "";
+                    while (!desc.trim()) {
+                        desc = prompt("请输入该 box 的描述（必填）:", "");
+                        if (desc === null) {
+                            // 用户点击取消
+                            isDrawing = false;
+                            currentBox = null;
+                            redraw();
+                            return;
+                        }
+                    }
+
+                    // ✅ 只保存纯文本，不加额外引号
+                    boxes.push({
+                        x, y, w, h,
+                        description: desc.trim()  // ← 关键：直接存纯字符串
+                    });
+                }
+            }
+
+            // 重置状态
+            isDrawing = false;
+            isDragging = false;
+            currentBox = null;
+            selectedBoxIndex = -1;
+            redraw();
+        }
+
+        function redraw() {
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制所有已保存的 box
+            boxes.forEach(box => {
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(box.x, box.y, box.w, box.h);
+            });
+
+            // 绘制正在绘制或拖动的 box（红色）
+            if (currentBox) {
+                ctx.strokeStyle = '#f00';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
+            }
+        }
+
+        function exportBoxes() {
+            // ✅ JSON.stringify 会自动用双引号包裹字符串
+            const jsonStr = JSON.stringify(boxes, null, 2);
+            const output = document.getElementById('jsonOutput');
+            output.textContent = jsonStr;
+            output.style.display = 'block';
+            console.log("导出的 Boxes 数据:", boxes);
+        }
+    </script>
+</body>
+</html>

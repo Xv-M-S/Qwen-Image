@@ -69,3 +69,7 @@ you can use label tool to label the layout of image
 cd image_bbox_tool
 python app.py
 ```
+
+# draw box layout automatically
+
+you can copy the ./image_bbox_tool/templates/draw_box.html to your windows and click the draw_box.html to start
