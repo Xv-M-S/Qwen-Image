@@ -41,6 +41,7 @@ python quickStart.py
 ``` bash
 pip install gradio
 pip install dashscope
+pip install flask
 export NUM_GPUS_TO_USE=1          # Number of GPUs to use
 export TASK_QUEUE_SIZE=100        # Task queue size
 export TASK_TIMEOUT=300           # Task timeout in seconds
@@ -59,4 +60,12 @@ python hyperParamExp.py
 you can edit the boxLossConfig.py to change the input parameters
 ``` bash
 python boxLossControlStart.py
+```
+
+# label tool
+you can use label tool to label the layout of image
+
+``` bash
+cd image_bbox_tool
+python app.py
 ```
