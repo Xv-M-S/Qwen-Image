@@ -9,6 +9,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
 from config.boxLossConfig import boxConfig
+from util.textRenderHence import render_text_in_box_with_visualization
+from util.textComposition import merge_english_word_boxes, visualize_structured_boxes_with_text
+from util.textRenderHence import filter_valid_boxes
 
 # 获取当前文件的绝对路径
 current_file_path = os.path.abspath(__file__)
@@ -16,6 +19,50 @@ current_dir_path = os.path.dirname(current_file_path)
 # 设置中文字体支持
 font_path = os.path.join(current_dir_path,'simhei.ttf')  # 替换为你的字体文件路径
 prop = font_manager.FontProperties(fname=font_path)
+
+def remove_quotes(input_string):
+    """
+    移除字符串中的所有单引号(')和双引号(")。
+
+    Args:
+        input_string (str): 输入的字符串。
+
+    Returns:
+        str: 移除了所有引号的字符串。
+    """
+    if not isinstance(input_string, str):
+        raise TypeError("输入必须是字符串类型")
+        
+    # 使用 str.replace() 方法移除引号
+    no_single_quotes = input_string.replace("'", "")
+    no_quotes = no_single_quotes.replace('"', '')
+    return no_quotes
+
+def get_child_boxes(box_text_pairs, image_width, image_height):
+    result_pairs = {}
+    for k, v in box_text_pairs.items():
+        # print(k, v)
+        description = v["description"]
+        description = remove_quotes(description)
+        mask = v["mask"]
+        char_boxes_v, img_v = render_text_in_box_with_visualization(
+            image_width=image_width,
+            image_height=image_height,
+            text=description,
+            box=mask,
+            font_path=font_path
+        )
+        # char_boxes_v = filter_valid_boxes(char_boxes_v)
+        img_v.save(f"{k}.png")
+    
+        result_sk_pairs = merge_english_word_boxes(description, char_boxes_v)
+        child_box_list = []
+        for kk, vv in result_sk_pairs.items():
+            child_box_list.append(vv["mask"])
+        v["child_boxes"] = child_box_list
+        result_pairs[k] = v
+    return result_pairs
+
 
 # 计算函数运行时间
 def cost_time(func):
@@ -120,7 +167,7 @@ if __name__ == "__main__":
     regional_prompt_mask_pairs = {
         "0": {
             "description": ''' a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" ''',
-            "mask": [128, 128, 384, 640]
+            "mask": [128, 240, 384, 640]
         },
         "1": {
             "description": ''' a plaque sign "通义千问" ''',
@@ -129,6 +176,10 @@ if __name__ == "__main__":
         "2": {
             "description": ''' a poster is written "π≈3.1415926-53589793-23846264-33832795-02384197" ''',
             "mask": [500, 640, 756, 780]
+        },
+        "3":{
+            "description" : '''A poster showing a beautiful Chinese woman''',
+            "mask": [500, 500, 756, 756]
         }
     }
 
@@ -141,3 +192,6 @@ if __name__ == "__main__":
     image_path = "/home/sxm/flux-workspace/Qwen-Image/example.png"
     # 可视化在图片上
     draw_masks_on_image(image_path=image_path, regional_prompt_mask_pairs=regional_prompt_mask_pairs)
+
+    result_pairs = get_child_boxes(regional_prompt_mask_pairs)
+    print(result_pairs)
