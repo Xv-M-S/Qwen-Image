@@ -53,7 +53,7 @@ def get_child_boxes(box_text_pairs, image_width, image_height):
             font_path=font_path
         )
         # char_boxes_v = filter_valid_boxes(char_boxes_v)
-        img_v.save(f"{k}.png")
+        img_v.save(f"./runing_output_tempfile/{k}.png")
     
         result_sk_pairs = merge_english_word_boxes(description, char_boxes_v)
         child_box_list = []

@@ -80,28 +80,18 @@ def get_hw():
 
 def prepare_regional_control(height, width):
     ## regional prompt and mask settings
-    regional_prompt_mask_pairs = {
-        "0": {
-            "description": '''a chalkboard sign reading "Qwen Coffee 😊 $2 per cup"''',
-            "mask": [128, 240, 384, 640]
-        },
-        "1": {
-            "description": '''a neon light  displaying "通义千问"''',
-            "mask": [500, 48, 840, 160]
-        },
-        "2": {
-            "description": '''"π≈3.1415926-53589793-23846264-33832795-02384197" is written on the wall''',
-            "mask": [500, 640, 756, 780]
-        },
-        # "3":{
-        #     "description" : '''A poster showing a beautiful Chinese woman''',
-        #     "mask": [900, 280, 1280, 680]
-        # }
-    }
+    from testCase import regional_prompt_mask_pairs2 as regional_prompt_mask_pairs
+    from util.tool import get_child_boxes
+    from util.textComposition import visualize_structured_boxes_with_text
+
+    regional_prompt_mask_pairs = get_child_boxes(regional_prompt_mask_pairs, width, height)
+    print(regional_prompt_mask_pairs)
+    visualize_structured_boxes_with_text(width, height, regional_prompt_mask_pairs, output_path="./runing_output_tempfile/output_structured_boxes_with_text.png")
 
     regional_prompts = []
     regional_masks = []
     regional_boxes = []
+    regional_child_boxes = []
 
     background_prompt = "a photo" # set by default, but if you want to enrich background, you can set it to a more descriptive prompt
     background_prompt = '''A coffee shop entrance, '''
@@ -110,6 +100,7 @@ def prepare_regional_control(height, width):
     for region_idx, region in regional_prompt_mask_pairs.items():
         description = region['description']
         mask = region['mask']
+        child_mask = region['child_boxes']
         regional_boxes.append(mask)
         x1, y1, x2, y2 = mask
         mask = torch.zeros((height, width))
@@ -117,6 +108,7 @@ def prepare_regional_control(height, width):
         background_mask -= mask
         regional_prompts.append(description)
         regional_masks.append(mask)
+        regional_child_boxes.append(child_mask)
 
     # if regional masks don't cover the whole image, append background prompt and mask
     whole_regional_mask = torch.ones((height, width)) - background_mask
@@ -124,12 +116,16 @@ def prepare_regional_control(height, width):
         regional_prompts.append(background_prompt)
         regional_masks.append(background_mask)
 
-    return regional_prompts, regional_masks, regional_boxes, whole_regional_mask, regional_prompt_mask_pairs
+    return regional_prompts, regional_masks, regional_boxes, whole_regional_mask, regional_prompt_mask_pairs, regional_child_boxes
 
 def prepare_base_control():
     # base prompt settings
     base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup", and a neon light  displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197".  '''
     base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" , and a neon light  displaying "通义千问" . A poster showing a beautiful Chinese woman , and "π≈3.1415926-53589793-23846264-33832795-02384197" is written on the wall .'''
+    base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" , and a neon light  displaying "通义千问" . A poster showing a beautiful Chinese woman. the text "庐山云雾" is written on the wall .'''
+    base_prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup" , and a neon light  displaying "通义千问" . the text "庐山云雾" is written on the wall .'''
+    base_prompt = '''the text "庐山云雾" is written on the wall .'''
+    base_prompt = '''A coffee shop entrance features a chalkboard sign reading "咖啡店" , and a neon light  displaying "通义千问" . the text "π≈3.1415926" is written on the wall .'''
     # base_prompt = '''A coffee shop entrance, '''
 
     negative_prompt = " " # Recommended if you don't use a negative prompt.
@@ -153,7 +149,7 @@ def run():
     pipe, controller = load_model()
     height,width = get_hw()
     base_prompt, negative_prompt, positive_magic = prepare_base_control()
-    regional_prompts, regional_masks, regional_boxes, whole_regional_mask, regional_prompt_mask_pairs = prepare_regional_control(height, width)
+    regional_prompts, regional_masks, regional_boxes, whole_regional_mask, regional_prompt_mask_pairs, regional_child_boxes = prepare_regional_control(height, width)
 
     ## visual layout
     visualize_mask_pairs(regional_prompt_mask_pairs, width, height, os.path.join(save_path, "visual_layout.png"))
@@ -172,6 +168,7 @@ def run():
             "regional_prompts": regional_prompts,
             "regional_masks": regional_masks,
             "regional_boxes": regional_boxes,
+            "regional_child_boxes": regional_child_boxes,
             "double_inject_blocks_interval": double_inject_blocks_interval,
             # "single_inject_blocks_interval": single_inject_blocks_interval,
             "base_ratio": base_ratio,
@@ -189,7 +186,7 @@ def run():
     image.save(image_path)
 
     # visual layout on image
-    draw_masks_on_image(image_path, regional_prompt_mask_pairs, output_path=os.path.join(save_path, "example_with_mask.png"))
+    draw_masks_on_image(image_path, regional_prompt_mask_pairs, output_path=os.path.join(save_path, boxConfig.save_name))
 
 
 

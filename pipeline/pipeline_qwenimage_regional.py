@@ -17,7 +17,8 @@ from torchviz import make_dot
 from util.visual import visualize_feature_activation, visualize_feature_channel, visualize_latent_map
 from pipeline.lossDesign import compute_diff_loss
 from pipeline.rnbLoss import compute_rnb_loss
-from util.latent_search import histogram_matching
+from util.latent_search import histogram_matching, process_matrix_with_noise
+from pipeline.LossUtil import LossUtil
 
 
 def apply_rotary_emb_qwen(
@@ -206,6 +207,7 @@ class RegionalQwenImageAttnProcessor:
                 # no viusal of negative prompt
                 visualize_feature_activation(img_txt_attn.clone().detach(), index_block)
                 visualize_feature_channel(img_txt_attn.clone().detach(), index_block)
+                visualize_feature_channel(txt_img_attn.clone().detach().transpose(1, 2), index_block, "txt-to-img")
 
         # Reshape back
         joint_hidden_states = joint_hidden_states.transpose(1, 2).flatten(2, 3)  # [B, S_joint, H*D]
@@ -710,7 +712,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                     # latents = (latents - latents.mean()) / (latents.std() + 1e-8)
                     latents_old = latents.clone().detach()
                     # print(latents_old.min().item(), latents_old.max().item())
-                    latents_new = histogram_matching(latents_old, device=latents.device, dtype = latents.dtype)
+                    # latents_new = histogram_matching(latents_old, device=latents.device, dtype = latents.dtype)
+                    latents_new = process_matrix_with_noise(latents_old)
                     latents_new.clone().detach().requires_grad_(True)
                     # print(latents_new.min().item(), latents_new.max().item())
                     return latents_new
@@ -730,7 +733,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                     # latents = (latents - latents.mean()) / (latents.std() + 1e-8)
                     latents_old = latents.clone().detach()
                     # print(latents_old.min().item(), latents_old.max().item())
-                    latents_new = histogram_matching(latents_old, device=latents.device, dtype = latents.dtype)
+                    # latents_new = histogram_matching(latents_old, device=latents.device, dtype = latents.dtype)
+                    latents_new = process_matrix_with_noise(latents_old)
                     latents_new.clone().detach().requires_grad_(True)
                     # print(latents_new.min().item(), latents_new.max().item())
                     return latents_new
@@ -750,14 +754,19 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                                            step_size: float,
                                            timestep: torch.Tensor,
                                            guidance: torch.Tensor,
-                                           max_refinement_steps: int = 20
+                                           max_refinement_steps: int = 20,
+                                           loss_util: LossUtil = None
                                            ):
         """
         Performs the iterative latent refinement introduced in the paper. Here, we continuously update the latent
         code according to our loss objective until the given threshold is reached for all tokens.
         """
+        if max_refinement_steps==0:
+            return latents
+        
         iteration = 0
-        target_loss = max(0, 1. - threshold)
+        # target_loss = max(0, 1. - threshold)
+        target_loss = 0
         while loss_fg > target_loss:
             iteration += 1
 
@@ -794,7 +803,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                     indices_to_alter=indices_to_alter,
                     gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
                     shape = (self._height ,self._width ,self.vae_scale_factor*2),
-                    bbox=self.attention_kwargs.get("regional_boxes")
+                    bbox=self.attention_kwargs.get("regional_boxes"),
+                    child_bbox = self.attention_kwargs.get("regional_child_boxes")
                 )
             elif boxConfig.lossType == "rnb":
                 loss_fg, loss_list = compute_rnb_loss(
@@ -802,7 +812,9 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                     indices_to_alter=indices_to_alter,
                     gaussian_smoothing_kwargs=self._gaussian_smoothing_kwargs,
                     shape = (self._height ,self._width ,self.vae_scale_factor*2),
-                    bbox=self.attention_kwargs.get("regional_boxes")
+                    bbox=self.attention_kwargs.get("regional_boxes"),
+                    child_bbox = self.attention_kwargs.get("regional_child_boxes"),
+                    loss_util=loss_util
                 )
 
             if loss_fg != 0:  # 此处算出来的梯度特别小，导致loss_fg基本没更新
@@ -1127,7 +1139,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        scale_range = np.linspace(boxConfig.scale_range[0], boxConfig.scale_range[1], self._num_timesteps)
+        # scale_range = np.linspace(boxConfig.scale_range[0], boxConfig.scale_range[1], self._num_timesteps)
+        scale_range = boxConfig.scale_range_value
 
         # handle guidance
         if self.transformer.config.guidance_embeds:
@@ -1156,6 +1169,10 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
         # add some args for visualization
         boxConfig.text_index = quote_to_token_positions
         boxConfig.bbox = attention_kwargs.get("regional_boxes")
+
+        # LossUtil 初始化
+        loss_names = boxConfig.text_index.keys()
+        loss_util = LossUtil(loss_names, total_weight=boxConfig.total_weight)
 
 
         # 6. Denoising loop
@@ -1213,7 +1230,8 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                                     indices_to_alter=quote_to_token_positions,
                                     gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
                                     shape = (height,width,self.vae_scale_factor*2),
-                                    bbox=attention_kwargs.get("regional_boxes")
+                                    bbox= attention_kwargs.get("regional_boxes"),
+                                    child_bbox = attention_kwargs.get("regional_child_boxes") # 不存在则返回None
                                 )
                             elif boxConfig.lossType == "rnb":
                                 loss_fg, loss_list = compute_rnb_loss(
@@ -1221,18 +1239,21 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                                     indices_to_alter=quote_to_token_positions,
                                     gaussian_smoothing_kwargs=gaussian_smoothing_kwargs,
                                     shape = (height,width,self.vae_scale_factor*2),
-                                    bbox=attention_kwargs.get("regional_boxes")
+                                    bbox=attention_kwargs.get("regional_boxes"),
+                                    child_bbox = attention_kwargs.get("regional_child_boxes"), # 不存在则返回None
+                                    loss_util=loss_util
                                 )
                             if loss_fg != 0:
                                 latents = self._update_latent(latents=latents, loss=loss_fg, loss_list = loss_list, # 原实现此处用loss
-                                                                step_size=boxConfig.scale_factor * np.sqrt(scale_range[i]))
+                                                                step_size=boxConfig.scale_factor * scale_range[i])
 
                             # Refinement from attend-and-excite (not necessary)
                             if True:
 
                                 # loss_fg, loss = self._compute_loss(max_attention_per_index_fg, max_attention_per_index_bg, dist_x, dist_y)
 
-                                if i in boxConfig.thresholds.keys() and loss_fg > 1. - boxConfig.thresholds.get(i) and boxConfig.refine:
+                                # if i in boxConfig.thresholds.keys() and loss_fg > 1. - boxConfig.thresholds.get(i) and boxConfig.refine:
+                                if boxConfig.refine:
                                     del noise_pred_text
                                     torch.cuda.empty_cache()
                                     latents = self._perform_iterative_refinement_step(
@@ -1245,10 +1266,12 @@ class RegionalQwenImagePipeline(QwenImagePipeline):
                                         loss_fg=loss_fg,
                                         threshold=boxConfig.thresholds.get(i),
                                         attention_store=attention_store,
-                                        step_size= boxConfig.scale_factor * np.sqrt(scale_range[i]),
+                                        step_size= boxConfig.scale_factor * scale_range[i],
                                         timestep=timestep,
                                         guidance=guidance,  # use a larger guidance scale for refinement
-                                        max_refinement_steps=boxConfig.max_refinement_steps.get(i,0)
+                                        max_refinement_steps=boxConfig.max_refinement_steps.get(i,boxConfig.default_value),
+                                        loss_util=loss_util,
+
                                     )
                         
                         

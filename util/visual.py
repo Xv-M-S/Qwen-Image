@@ -47,7 +47,7 @@ def visualize_feature_activation(feature, index):
     plt.close()
 
 # 绘制区域prompt的attention map的特征通道激活图
-def visualize_feature_channel(feature, index):
+def visualize_feature_channel(feature, index, name = "img-to-txt"):
     feature = feature.squeeze(0) 
     # Reshape 到图像
     H, W = int(boxConfig.H /16), int(boxConfig.W/16)  
@@ -106,7 +106,7 @@ def visualize_feature_channel(feature, index):
     output_dir = os.path.join(current_dir_path,f"../runing_output_tempfile/feature_map/activate_{boxConfig.now_step}")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    output_path = os.path.join(output_dir,f"feature_activation_map_text_{index}.png")
+    output_path = os.path.join(output_dir,f"feature_activation_map_text_{index}_{name}.png")
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
