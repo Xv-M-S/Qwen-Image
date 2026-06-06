@@ -69,12 +69,18 @@ def get_hw():
         "3:4": (1104, 1472),
         "3:2": (1584, 1056),
         "2:3": (1056, 1584),
+        "512:512": (512, 512)
     }
 
-    width, height = aspect_ratios["16:9"]
+    # width, height = aspect_ratios["512:512"]
+    width, height = aspect_ratios["1:1"]
 
     boxConfig.H = height
     boxConfig.W = width
+
+    
+    # boxConfig.H = 512
+    # boxConfig.W = 512
 
     return height, width
 
@@ -127,6 +133,15 @@ def prepare_base_control():
     base_prompt = '''the text "庐山云雾" is written on the wall .'''
     base_prompt = '''A coffee shop entrance features a chalkboard sign reading "咖啡店" , and a neon light  displaying "通义千问" . the text "π≈3.1415926" is written on the wall .'''
     # base_prompt = '''A coffee shop entrance, '''
+    base_prompt = ''' A giant panda with a dragon floating behind it. '''
+    base_prompt = '纯黑色背景，一个绿色的视觉文本，在中部偏上的位置，内容为"视觉文本生成"，一个蓝色的视觉文本,内容为"Can you"，在中部偏下'
+    
+    base_prompt = '''为传统风筝艺术展设计一张海报。背景使用蓝天白云的图片，并在中心放置一幅大型的传统风筝图案。在风筝下面有个标题是‘传统风筝的魅力’，字体要大且醒目；在标题的下面有一首小诗‘纸鸢翻古韵，春风载梦遥’。底部右下角放置活动时间‘大年初六’和地点‘港村’。整个画面要体现传统文化的韵味。'''
+    base_prompt = '''An epic fantasy movie poster, featuring a majestic giant panda standing in the foreground on a misty mountain peak. Behind it, a colossal Chinese dragon with vibrant red and gold scales is floating majestically through the clouds. The background consists of traditional Chinese ink-wash landscape painting style mountains shrouded in fog. Ethereal lighting, cinematic composition, highly detailed fur texture on the panda, glowing eyes on the dragon, 8k resolution, trending on ArtStation, a sense of harmony and ancient power. 
+Text overlay in elegant Chinese calligraphy font at the top:  'The Legend of the Celestial Panda'.   
+Tagline in the bottom center in glowing golden letters: 'When the Dragon Rises, the Spirit Awakens'. 
+Bottom text in clean sans-serif font: 'Coming Soon to Theaters'. Visual hierarchy emphasizes title and tagline with high contrast against the misty background.
+'''
 
     negative_prompt = " " # Recommended if you don't use a negative prompt.
 
@@ -155,14 +170,15 @@ def run():
     visualize_mask_pairs(regional_prompt_mask_pairs, width, height, os.path.join(save_path, "visual_layout.png"))
 
     image = pipe(
-        base_prompt=base_prompt + positive_magic["en"],
+        # base_prompt=base_prompt + positive_magic["en"],
+        base_prompt=base_prompt,
         attention_store=controller, # added for attention store
         negative_prompt=negative_prompt,
         width=width,
         height=height,
         num_inference_steps=50,
         true_cfg_scale=4.0, # do not use CFG
-        generator=torch.Generator(device="cuda").manual_seed(70),
+        generator=torch.Generator(device="cuda").manual_seed(208),
         mask_inject_steps=mask_inject_steps, # inject mask
         attention_kwargs={
             "regional_prompts": regional_prompts,
