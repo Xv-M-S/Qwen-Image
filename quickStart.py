@@ -23,6 +23,7 @@ positive_magic = {
 prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup," with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197".'''
 
 prompt = ''' A coffee shop entrance features a chalkboard sign reading "知不可乎骤得,托遗响于悲风. 知不可乎骤得,托遗响于悲风.悟已往之不谏,知来者之可追。何事秋风悲画善，落叶聚还散，寒鸦栖复惊。相去日已远，衣带渐宽终不悔，为伊消得人憔悴。" with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful picture of a girl with a smile.'''
+prompt = '''为传统风筝艺术展设计一张海报。背景使用蓝天白云的图片，并在中心放置一幅大型的传统风筝图案。在风筝下面有个标题是‘传统风筝的魅力’，字体要大且醒目；在标题的下面有一首小诗‘纸鸢翻古韵，春风载梦遥’。底部右下角放置活动时间‘大年初六’和地点‘港村’。整个画面要体现传统文化的韵味。'''
 negative_prompt = " " # Recommended if you don't use a negative prompt.
 
 
@@ -49,4 +50,4 @@ image = pipe(
     generator=torch.Generator(device="cuda").manual_seed(42)
 ).images[0]
 
-image.save("example.png")
+image.save("quick.png")

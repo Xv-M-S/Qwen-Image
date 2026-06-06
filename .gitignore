@@ -1,0 +1,6 @@
+# 忽略所有 .pyc 和 .pyo 文件
+*.pyc
+*.pyo
+
+# 忽略所有名为 __pycache__ 的目录及其内容
+__pycache__/

@@ -381,7 +381,7 @@ def compute_rnb_loss(
     child_bbox:List[List[List[int]]],
     loss_util: LossUtil,
 ):
-    if child_bbox is None:
+    if child_bbox is None or config.use_character_box_loss is False:
         return _compute_rnb_loss_whole(
             attention_store=attention_store,
             indices_to_alter=indices_to_alter,

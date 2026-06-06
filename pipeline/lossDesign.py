@@ -183,7 +183,7 @@ def _aggregate_and_get_max_attention_per_token(
             select=0 # why 0
         )
     values_list = [indices_to_alter[key] for key in indices_to_alter]
-    if child_bbox is None:
+    if child_bbox is None or config.use_character_box_loss is False:
         diff_fg_bg = _compute_max_attention_per_index(
             attention_maps=attention_maps,
             indices_to_alter=values_list,

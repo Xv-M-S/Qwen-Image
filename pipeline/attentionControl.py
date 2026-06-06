@@ -18,14 +18,17 @@ class AttentionControl(abc.ABC):
     def forward(self, attn, is_cross: bool):
         raise NotImplementedError
 
-    def __call__(self, attn, is_cross: bool):
+    def __call__(self, img_txt_attn, img_txt_key: str, txt_to_img_attn=None, txt_to_img_key: str=None):
         if self.cur_att_layer >= self.num_uncond_att_layers:
-            self.forward(attn, is_cross)
+            self.forward(img_txt_attn, img_txt_key)
+            if txt_to_img_attn is not None:
+                self.forward(txt_to_img_attn, txt_to_img_key)
         self.cur_att_layer += 1
         if self.cur_att_layer == self.num_att_layers + self.num_uncond_att_layers:
             self.cur_att_layer = 0
             self.cur_step += 1
             self.between_steps()
+
 
     def reset(self):
         self.cur_step = 0

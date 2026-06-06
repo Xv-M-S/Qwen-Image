@@ -32,13 +32,27 @@
             "cwd": "/home/sxm/flux-workspace/Qwen-Image",
             "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3",
             // 允许调试第三方库
-            "justMyCode": false
+            "justMyCode": false,
+             "env": {
+                "CUDA_VISIBLE_DEVICES": "2"  // 指定使用第0号显卡（根据实际情况修改编号）
+            }
         },
         {
             "name": "loss 调试",
             "type": "debugpy",
             "request": "launch",
             "program": "/home/sxm/flux-workspace/Qwen-Image/pipeline/avgLossUtil.py",
+            "console": "integratedTerminal",
+            "cwd": "/home/sxm/flux-workspace/Qwen-Image",
+            "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3",
+            // 允许调试第三方库
+            "justMyCode": false
+        },
+        {
+            "name": "attention_mask_improved_inference调试",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/sxm/flux-workspace/Qwen-Image/attention_mask_improved_inference.py",
             "console": "integratedTerminal",
             "cwd": "/home/sxm/flux-workspace/Qwen-Image",
             "python": "/home/sxm/anaconda3/envs/qwenImageEnv/bin/python3",
